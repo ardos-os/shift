@@ -30,6 +30,11 @@ pub struct SessionRegistry {
 	token_index: HashMap<String, String>,
 }
 
+pub enum CycleDirection {
+	Forward,
+	Backward,
+}
+
 impl SessionRegistry {
 	pub fn new() -> Self {
 		Self {
@@ -92,6 +97,32 @@ impl SessionRegistry {
 
 	pub fn iter(&self) -> impl Iterator<Item = &Session> {
 		self.sessions.values()
+	}
+
+	pub fn cycle_session(&self, current: Option<&str>, direction: CycleDirection) -> Option<String> {
+		let mut ids: Vec<&Session> = self
+			.sessions
+			.values()
+			.filter(|s| {
+				matches!(
+					s.state,
+					SessionLifecycle::Loading | SessionLifecycle::Occupied
+				)
+			})
+			.collect();
+		if ids.is_empty() {
+			return None;
+		}
+		ids.sort_by(|a, b| a.id.cmp(&b.id));
+		let idx = current
+			.and_then(|curr| ids.iter().position(|s| s.id == curr))
+			.unwrap_or(0);
+		let len = ids.len();
+		let next_idx = match direction {
+			CycleDirection::Forward => (idx + 1) % len,
+			CycleDirection::Backward => (idx + len - 1) % len,
+		};
+		Some(ids[next_idx].id.clone())
 	}
 
 	pub fn create_pending(

@@ -5,10 +5,12 @@ use tracing_subscriber::EnvFilter;
 
 #[macro_use]
 mod macros;
+mod animations;
 mod app;
 mod dma_buf_importer;
 mod egl;
 mod error;
+mod input;
 mod opengl;
 mod output;
 mod presenter;
