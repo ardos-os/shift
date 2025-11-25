@@ -23,8 +23,9 @@ use nix::{
 };
 use tab_protocol::{
 	AuthOkPayload, AuthPayload, DEFAULT_SOCKET_PATH, FrameDonePayload, FramebufferLinkPayload,
-	HelloPayload, MonitorAddedPayload, MonitorInfo, MonitorRemovedPayload, PROTOCOL_VERSION,
-	ProtocolError, SessionInfo, SessionReadyPayload, TabMessage, TabMessageFrame, message_header,
+	HelloPayload, InputEventPayload, MonitorAddedPayload, MonitorInfo, MonitorRemovedPayload,
+	PROTOCOL_VERSION, ProtocolError, SessionCreatedPayload, SessionInfo, SessionReadyPayload,
+	TabMessage, TabMessageFrame, message_header,
 };
 
 mod egl;
@@ -104,6 +105,8 @@ pub enum TabEvent {
 	MonitorAdded(MonitorInfo),
 	MonitorRemoved(String),
 	SessionState(SessionInfo),
+	Input(InputEventPayload),
+	SessionCreated(SessionCreatedPayload),
 }
 
 #[derive(Clone, Copy)]
@@ -547,6 +550,12 @@ impl TabClient {
 			}
 			TabMessage::SessionState(payload) => {
 				events.push(TabEvent::SessionState(payload.session));
+			}
+			TabMessage::SessionCreated(payload) => {
+				events.push(TabEvent::SessionCreated(payload));
+			}
+			TabMessage::InputEvent(payload) => {
+				events.push(TabEvent::Input(payload));
 			}
 			other => {
 				if let TabMessage::Error(payload) = &other {

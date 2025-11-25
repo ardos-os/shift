@@ -19,6 +19,8 @@ pub enum ShiftError {
 	EnvVar(#[from] std::env::VarError),
 	#[error("render error: {0}")]
 	Render(#[from] RenderError),
+	#[error("libinput error: {0}")]
+	Libinput(String),
 }
 
 pub type FrameAck = Vec<(String, String)>;

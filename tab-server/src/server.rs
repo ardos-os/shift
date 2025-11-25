@@ -14,13 +14,16 @@ use crate::connection::TabConnection;
 use crate::monitor::Monitor;
 #[cfg(feature = "easydrm")]
 use crate::monitor::MonitorIdStorage;
-use crate::session::SessionRegistry;
+use crate::session::{CycleDirection, SessionRegistry};
 use tab_protocol::{
-	DEFAULT_SOCKET_PATH, FramebufferLinkPayload, MonitorAddedPayload, MonitorInfo,
-	MonitorRemovedPayload, ProtocolError, SessionInfo, SessionRole, SessionStatePayload,
-	SessionSwitchPayload, TabMessageFrame, message_header,
+	DEFAULT_SOCKET_PATH, FramebufferLinkPayload, InputEventPayload, MonitorAddedPayload, MonitorInfo,
+	MonitorRemovedPayload, ProtocolError, SessionActivePayload, SessionInfo, SessionRole,
+	SessionStatePayload, SessionSwitchPayload, TabMessageFrame, message_header,
 };
 use tracing::warn;
+
+const DEFAULT_SWITCH_ANIMATION: &str = "slideleft";
+const DEFAULT_SWITCH_DURATION: Duration = Duration::from_millis(1000);
 
 /// Server-side error type.
 #[derive(Debug, thiserror::Error)]
@@ -194,6 +197,35 @@ impl<Texture> TabServer<Texture> {
 		}
 	}
 
+	pub fn forward_input_event(&mut self, event: InputEventPayload) {
+		let Some(session_id) = self.current_session_id.clone() else {
+			return;
+		};
+		let frame = TabMessageFrame::json(message_header::INPUT_EVENT, event);
+		self.send_to_session(&frame, &session_id);
+	}
+
+	pub fn cycle_next_session(&mut self) -> Option<String> {
+		self.cycle_session(CycleDirection::Forward)
+	}
+
+	pub fn cycle_previous_session(&mut self) -> Option<String> {
+		self.cycle_session(CycleDirection::Backward)
+	}
+
+	fn cycle_session(&mut self, direction: CycleDirection) -> Option<String> {
+		let target = self
+			.sessions
+			.cycle_session(self.current_session_id.as_deref(), direction)?;
+		let payload = SessionSwitchPayload {
+			session_id: target.clone(),
+			animation: Some(DEFAULT_SWITCH_ANIMATION.to_string()),
+			duration: DEFAULT_SWITCH_DURATION,
+		};
+		self.dispatch_event(ServerEvent::SessionSwitch(payload));
+		Some(target)
+	}
+
 	#[cfg(feature = "easydrm")]
 	pub fn ensure_monitors_are_up_to_date_with_easydrm<C>(
 		&mut self,
@@ -224,6 +256,7 @@ impl<Texture> TabServer<Texture> {
 				name: format!("Connector {connector_raw}"),
 				x: cursor_x,
 				y: 0,
+				cursor_position: (0, 0),
 			};
 			seen.insert(id.clone());
 			self.register_monitor(info);
@@ -356,7 +389,11 @@ impl<Texture> TabServer<Texture> {
 						"swap_buffers for unknown session"
 					);
 				} else if self.current_session_id.is_none() {
-					self.current_session_id = Some(session_id);
+					self.activate_session(
+						session_id,
+						Some(DEFAULT_SWITCH_ANIMATION.to_string()),
+						Some(DEFAULT_SWITCH_DURATION),
+					);
 				}
 			}
 			ServerEvent::SessionSwitch(payload) => {
@@ -365,16 +402,7 @@ impl<Texture> TabServer<Texture> {
 					animation,
 					duration,
 				} = payload;
-				if let Some(animation) = animation {
-					self.transition_state = Some(SessionTransitionState::new(
-						animation,
-						duration,
-						std::mem::replace(&mut self.current_session_id, session_id.into()),
-					));
-				} else {
-					self.transition_state = None;
-					self.current_session_id = Some(session_id);
-				}
+				self.activate_session(session_id, animation, Some(duration));
 			}
 		}
 	}
@@ -505,5 +533,38 @@ impl<Texture> TabServer<Texture> {
 			}
 		}
 		Ok(())
+	}
+
+	fn broadcast_active_session(&self, session_id: &str) {
+		let frame = TabMessageFrame::json(
+			message_header::SESSION_ACTIVE,
+			SessionActivePayload {
+				session_id: session_id.to_string(),
+			},
+		);
+		self.broadcast_to_sessions(&frame);
+	}
+
+	fn activate_session(
+		&mut self,
+		session_id: String,
+		animation: Option<String>,
+		duration: Option<Duration>,
+	) {
+		let already_active = self.current_session_id.as_deref() == Some(session_id.as_str());
+		if already_active {
+			return;
+		}
+		let previous = std::mem::replace(&mut self.current_session_id, Some(session_id.clone()));
+		if let (Some(anim), Some(dur)) = (animation, duration) {
+			if previous.is_some() {
+				self.transition_state = Some(SessionTransitionState::new(anim, dur, previous));
+			} else {
+				self.transition_state = None;
+			}
+		} else {
+			self.transition_state = None;
+		}
+		self.broadcast_active_session(&session_id);
 	}
 }

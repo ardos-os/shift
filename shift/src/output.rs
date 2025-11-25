@@ -3,24 +3,31 @@ use easydrm::MonitorContextCreationRequest;
 use crate::egl::Egl;
 use std::time::{Duration, Instant};
 
-use crate::renderer::MonitorRenderer;
+use crate::renderer::{BlurPipeline, PingPongBuffers, QuadRenderer};
 use tab_server::MonitorIdStorage;
 
 pub struct OutputContext {
 	monitor_id: Option<String>,
 	pub egl: Egl,
-	pub renderer: MonitorRenderer,
+	pub renderer: QuadRenderer,
+	pub blur_pipeline: BlurPipeline,
+	pub blur_buffers: PingPongBuffers,
 	fps: FpsCounter,
 }
 
 impl OutputContext {
 	pub fn new(request: &MonitorContextCreationRequest<'_>) -> Self {
 		let egl = Egl::load_with(request.get_proc_address);
-		let renderer = MonitorRenderer::new(request.gl).expect("failed to initialize renderer");
+		let renderer = QuadRenderer::new(request.gl).expect("failed to initialize renderer");
+		let blur_pipeline = BlurPipeline::new(request.gl).expect("failed to initialize blur pipeline");
+		let blur_buffers =
+			PingPongBuffers::new(request.gl).expect("failed to initialize ping-pong buffers");
 		Self {
 			monitor_id: None,
 			egl,
 			renderer,
+			blur_pipeline,
+			blur_buffers,
 			fps: FpsCounter::new(),
 		}
 	}

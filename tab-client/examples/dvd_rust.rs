@@ -2,10 +2,14 @@ use std::{
 	env,
 	error::Error,
 	os::fd::AsRawFd,
+	process::{Child, Command, Stdio},
 	time::{Duration, Instant},
 };
 
 use tab_client::{FrameTarget, TabClient, TabClientError, TabEvent, gl};
+use tab_protocol::{
+	InputEventPayload, KeyState, SessionCreatePayload, SessionRole, TabMessageFrame, message_header,
+};
 
 const DVD_BYTES: &[u8] = include_bytes!("dvd.png");
 const COLORS: &[[f32; 3]] = &[
@@ -15,12 +19,15 @@ const COLORS: &[[f32; 3]] = &[
 	[0.4, 0.7, 1.0],
 	[1.0, 0.7, 0.4],
 ];
+const KEY_ENTER: u32 = 28;
 
 fn main() -> Result<(), Box<dyn Error>> {
 	let token = env::args()
 		.nth(1)
 		.or_else(|| env::var("SHIFT_SESSION_TOKEN").ok())
 		.expect("Provide a session token via SHIFT_SESSION_TOKEN or argv[1]");
+	let session_client_bin = env::var("DVD_EXAMPLE_SESSION_CLIENT_BIN")
+		.expect("Set DVD_EXAMPLE_SESSION_CLIENT_BIN to the normal session client binary");
 
 	let mut client = TabClient::connect_default(token)?;
 	println!(
@@ -30,12 +37,19 @@ fn main() -> Result<(), Box<dyn Error>> {
 	);
 
 	let mut monitor_id = client.monitor_ids().into_iter().next();
+	let mut spawned_sessions: Vec<Child> = Vec::new();
 
 	if monitor_id.is_none() {
 		println!("Waiting for a monitor from Shift...");
 		while monitor_id.is_none() {
 			let events = pump_events(&mut client, true)?;
-			handle_events(&events, &mut monitor_id);
+			handle_events(
+				&mut client,
+				&events,
+				&mut monitor_id,
+				&session_client_bin,
+				&mut spawned_sessions,
+			)?;
 		}
 	}
 
@@ -51,11 +65,16 @@ fn main() -> Result<(), Box<dyn Error>> {
 	let mut logo = LogoState::new();
 	let mut last_frame = Instant::now();
 	let mut fps_counter = FpsCounter::new();
-
 	loop {
 		if monitor_id.is_none() {
 			let events = pump_events(&mut client, true)?;
-			handle_events(&events, &mut monitor_id);
+			handle_events(
+				&mut client,
+				&events,
+				&mut monitor_id,
+				&session_client_bin,
+				&mut spawned_sessions,
+			)?;
 			continue;
 		}
 
@@ -74,7 +93,13 @@ fn main() -> Result<(), Box<dyn Error>> {
 			}
 			Err(TabClientError::NoFreeBuffers(_)) => {
 				let events = pump_events(&mut client, true)?;
-				handle_events(&events, &mut monitor_id);
+				handle_events(
+					&mut client,
+					&events,
+					&mut monitor_id,
+					&session_client_bin,
+					&mut spawned_sessions,
+				)?;
 				continue;
 			}
 			Err(TabClientError::UnknownMonitor(_)) => {
@@ -85,11 +110,23 @@ fn main() -> Result<(), Box<dyn Error>> {
 		}
 
 		let events = pump_events(&mut client, false)?;
-		handle_events(&events, &mut monitor_id);
+		handle_events(
+			&mut client,
+			&events,
+			&mut monitor_id,
+			&session_client_bin,
+			&mut spawned_sessions,
+		)?;
 	}
 }
 
-fn handle_events(events: &[TabEvent], monitor_id: &mut Option<String>) {
+fn handle_events(
+	client: &mut TabClient,
+	events: &[TabEvent],
+	monitor_id: &mut Option<String>,
+	session_client_bin: &str,
+	spawned_sessions: &mut Vec<Child>,
+) -> Result<(), Box<dyn Error>> {
 	for event in events {
 		match event {
 			TabEvent::MonitorAdded(info) => {
@@ -108,9 +145,23 @@ fn handle_events(events: &[TabEvent], monitor_id: &mut Option<String>) {
 			TabEvent::SessionState(state) => {
 				println!("Session state changed: {:?}", state.state);
 			}
+			TabEvent::Input(payload) => {
+				handle_input_event(client, payload, session_client_bin, spawned_sessions)?;
+			}
+			TabEvent::SessionCreated(payload) => {
+				if payload.session.role == SessionRole::Session {
+					println!(
+						"Session {} ready with token {}",
+						payload.session.id, payload.token
+					);
+					let child = spawn_session_client(session_client_bin, &payload.token)?;
+					spawned_sessions.push(child);
+				}
+			}
 			TabEvent::FrameDone { .. } => {}
 		}
 	}
+	Ok(())
 }
 
 fn pump_events(client: &mut TabClient, blocking: bool) -> Result<Vec<TabEvent>, TabClientError> {
@@ -148,6 +199,44 @@ fn pump_events(client: &mut TabClient, blocking: bool) -> Result<Vec<TabEvent>, 
 		client.process_ready_swaps()?;
 	}
 	Ok(events)
+}
+
+fn handle_input_event(
+	client: &mut TabClient,
+	payload: &InputEventPayload,
+	session_client_bin: &str,
+	spawned_sessions: &mut Vec<Child>,
+) -> Result<(), Box<dyn Error>> {
+	match payload {
+		InputEventPayload::Key { key, state, .. } => {
+			println!("Key event: code={key} state={state:?}");
+			if *key == KEY_ENTER && *state == KeyState::Pressed {
+				println!("Enter pressed – requesting a Penger session");
+				request_session(client, "Penger Session")?;
+			}
+		}
+		_ => {}
+	}
+	Ok(())
+}
+
+fn request_session(client: &mut TabClient, display_name: &str) -> Result<(), Box<dyn Error>> {
+	let payload = SessionCreatePayload {
+		role: SessionRole::Session,
+		display_name: Some(display_name.to_string()),
+	};
+	let frame = TabMessageFrame::json(message_header::SESSION_CREATE, payload);
+	client.send(&frame)?;
+	Ok(())
+}
+
+fn spawn_session_client(bin: &str, token: &str) -> Result<Child, Box<dyn Error>> {
+	let mut cmd = Command::new(bin);
+	cmd.env("SHIFT_SESSION_TOKEN", token);
+	cmd.stdout(Stdio::inherit());
+	cmd.stderr(Stdio::inherit());
+	let child = cmd.spawn()?;
+	Ok(child)
 }
 
 struct LogoState {
@@ -379,7 +468,7 @@ void main() {
 		unsafe {
 			gl.BindFramebuffer(gl::FRAMEBUFFER, target.framebuffer());
 			gl.Viewport(0, 0, w, h);
-			gl.ClearColor(0.02, 0.02, 0.04, 1.0);
+			gl.ClearColor(0.2, 0.2, 0.2, 1.0);
 			gl.Clear(gl::COLOR_BUFFER_BIT);
 			gl.UseProgram(self.program);
 			gl.ActiveTexture(gl::TEXTURE0);

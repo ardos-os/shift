@@ -4,12 +4,13 @@ use std::process::{Child, Command, Stdio};
 use std::rc::{Rc, Weak};
 
 use easydrm::EasyDRM;
-use tab_protocol::SessionRole;
+use tab_protocol::{InputEventPayload, KeyState, MonitorInfo, SessionRole};
 use tab_server::{TabServer, TabServerError, generate_id};
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::dma_buf_importer::ExternalTexture;
 use crate::error::{FrameAck, ShiftError};
+use crate::input::InputManager;
 use crate::output::OutputContext;
 use crate::presenter::FramePresenter;
 
@@ -18,6 +19,7 @@ pub struct ShiftApp {
 	server: TabServer<ExternalTexture>,
 	_admin_child: Child,
 	frame_presenter: FramePresenter,
+	input: InputManager,
 }
 
 impl ShiftApp {
@@ -27,11 +29,13 @@ impl ShiftApp {
 		let mut server = Self::bind_server(&easydrm)?;
 		let _admin_child = Self::spawn_admin(&mut server)?;
 		server.ensure_monitors_are_up_to_date_with_easydrm(&mut *easydrm.borrow_mut());
+		let input = InputManager::new()?;
 		Ok(Self {
 			easydrm,
 			server,
 			_admin_child,
 			frame_presenter,
+			input,
 		})
 	}
 
@@ -105,13 +109,23 @@ impl ShiftApp {
 			let mut edrm = self.easydrm.borrow_mut();
 			let rendered = self.frame_presenter.render(&snapshot, &mut edrm)?;
 			edrm.swap_buffers()?;
-			let poll_fds = self.server.poll_fds();
+			let mut poll_fds = self.server.poll_fds();
+			poll_fds.push(self.input.fd());
 			edrm.poll_events_ex(poll_fds)?;
 			rendered
 		};
 		self
 			.server
 			.ensure_monitors_are_up_to_date_with_easydrm(&mut *self.easydrm.borrow_mut());
+		let monitor_infos = self.server.monitor_infos();
+		self.update_input_transform(&monitor_infos);
+		let mut input_events = Vec::new();
+		self
+			.input
+			.dispatch_events(|event| input_events.push(event))?;
+		for event in input_events {
+			self.handle_input_event(event);
+		}
 		self.notify_frames(&frame_pairs);
 		self.server.pump()?;
 		Ok(())
@@ -120,5 +134,48 @@ impl ShiftApp {
 	fn notify_frames(&mut self, frames: &FrameAck) {
 		let ack_iter = frames.iter().map(|(m, s)| (m.as_str(), s.as_str()));
 		self.server.notify_frame_rendered(ack_iter);
+	}
+
+	fn update_input_transform(&mut self, monitors: &[MonitorInfo]) {
+		if monitors.is_empty() {
+			self.input.set_transform_size(1, 1);
+			return;
+		}
+		let min_x = monitors.iter().map(|m| m.x).min().unwrap_or(0);
+		let min_y = monitors.iter().map(|m| m.y).min().unwrap_or(0);
+		let max_x = monitors.iter().map(|m| m.x + m.width).max().unwrap_or(1);
+		let max_y = monitors.iter().map(|m| m.y + m.height).max().unwrap_or(1);
+		let width = (max_x - min_x).max(1) as u32;
+		let height = (max_y - min_y).max(1) as u32;
+		self.input.set_transform_size(width, height);
+	}
+
+	fn handle_input_event(&mut self, event: InputEventPayload) {
+		if self.handle_session_shortcut(&event) {
+			return;
+		}
+		self.server.forward_input_event(event);
+	}
+
+	fn handle_session_shortcut(&mut self, event: &InputEventPayload) -> bool {
+		const KEY_LEFT: u32 = 105;
+		const KEY_RIGHT: u32 = 106;
+		match event {
+			InputEventPayload::Key { key, state, .. } if *state == KeyState::Pressed => {
+				if *key == KEY_RIGHT {
+					if self.server.cycle_next_session().is_none() {
+						debug!("No session available to cycle forward");
+					}
+					return true;
+				} else if *key == KEY_LEFT {
+					if self.server.cycle_previous_session().is_none() {
+						debug!("No session available to cycle backward");
+					}
+					return true;
+				}
+			}
+			_ => {}
+		}
+		false
 	}
 }

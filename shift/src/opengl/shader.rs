@@ -34,6 +34,7 @@ impl Shader {
 		)
 	}
 
+	#[allow(dead_code)]
 	pub fn attrib_location(&self, name: &str) -> i32 {
 		let c = CString::new(name).unwrap();
 		gl!(&self.gl, GetAttribLocation(self.program, c.as_ptr()))

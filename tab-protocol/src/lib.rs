@@ -179,6 +179,7 @@ pub struct MonitorInfo {
 	pub name: String,
 	pub x: i32,
 	pub y: i32,
+	pub cursor_position: (i32, i32),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
