@@ -532,6 +532,7 @@ impl TabClient {
 		assert!(monitor_id.chars().all(|c| !c.is_whitespace()));
 		let frame = TabMessageFrame::raw(message_header::SET_CURSOR_POS, format!("{monitor_id} {x} {y}"));
 		self.send(&frame)
+		// Ok(())
 	}
 
 	pub fn poll_events(&mut self) -> Result<Vec<TabEvent>, TabClientError> {

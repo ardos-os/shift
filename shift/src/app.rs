@@ -8,6 +8,7 @@ use tab_protocol::{InputEventPayload, KeyState, MonitorInfo, SessionRole};
 use tab_server::{TabServer, TabServerError, generate_id};
 use tracing::{debug, info};
 
+use crate::cursor_sync::CursorSync;
 use crate::dma_buf_importer::ExternalTexture;
 use crate::error::{FrameAck, ShiftError};
 use crate::input::InputManager;
@@ -20,8 +21,7 @@ pub struct ShiftApp {
 	_admin_child: Child,
 	frame_presenter: FramePresenter,
 	input: InputManager,
-	// Cursor handling removed from Shift; Tab messages for cursors are
-	// validated by the server but ignored by the compositor.
+	cursor_sync: CursorSync,
 }
 
 impl ShiftApp {
@@ -42,6 +42,7 @@ impl ShiftApp {
 			_admin_child,
 			frame_presenter,
 			input,
+			cursor_sync: CursorSync::new(),
 		})
 	}
 
@@ -139,9 +140,10 @@ impl ShiftApp {
 		}
 		self.notify_frames(&frame_pairs);
 
-		// Cursor messages are validated by the Tab server but ignored by the
-		// compositor in this build. We still capture active/transition state
-		// above for other uses but do not drive hardware cursor updates here.
+		// Sync hardware cursor state from tab-server each frame.
+		// Only re-upload the cursor buffer when the image_hash changes;
+		// always update position (cheap operation).
+		self.cursor_sync.sync(&self.server, &self.easydrm);
 
 		self.server.pump()?;
 		Ok(())
@@ -192,4 +194,5 @@ impl ShiftApp {
 		}
 		false
 	}
+
 }

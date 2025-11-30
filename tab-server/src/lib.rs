@@ -13,4 +13,5 @@ pub use server::{
 	MonitorRenderSnapshot, RenderSnapshot, RenderTransition, TabServer,
 	TabServerError,
 };
+pub use monitor::Cursor;
 pub use session::{Session, SessionRegistry};

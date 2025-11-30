@@ -1,186 +1,178 @@
-use std::env;
-use std::error::Error;
-use std::os::fd::AsRawFd;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::{
+	env,
+	error::Error,
+	os::fd::AsRawFd,
+	process::{Child, Command, Stdio},
+	time::{Duration, Instant},
+};
 
-use image::GenericImageView;
 use tab_client::{FrameTarget, TabClient, TabClientError, TabEvent, gl};
-use tab_protocol::InputEventPayload;
+use tab_protocol::{
+	InputEventPayload, KeyState, SessionCreatePayload, SessionRole, TabMessageFrame, message_header,
+	CursorPositionPayload, CursorFramebufferPayload,
+};
 
-const CURSOR_BYTES: &[u8] = include_bytes!("penger.png");
-const TWO_PI: f32 = std::f32::consts::PI * 2.0;
+const DVD_BYTES: &[u8] = include_bytes!("dvd.png");
+const COLORS: &[[f32; 3]] = &[
+	[1.0, 1.0, 1.0],
+	[1.0, 0.4, 0.4],
+	[0.4, 1.0, 0.5],
+	[0.4, 0.7, 1.0],
+	[1.0, 0.7, 0.4],
+];
+const KEY_ENTER: u32 = 28;
 
 fn main() -> Result<(), Box<dyn Error>> {
-	tracing_subscriber::fmt::try_init().ok();
 	let token = env::args()
 		.nth(1)
 		.or_else(|| env::var("SHIFT_SESSION_TOKEN").ok())
 		.expect("Provide a session token via SHIFT_SESSION_TOKEN or argv[1]");
+	let session_client_bin = env::var("DVD_EXAMPLE_SESSION_CLIENT_BIN")
+		.expect("Set DVD_EXAMPLE_SESSION_CLIENT_BIN to the normal session client binary");
 
 	let mut client = TabClient::connect_default(token)?;
 	println!(
-		"Connected to Shift server '{}' speaking {}",
+		"Connected to Shift server '{}' via protocol {}",
 		client.hello().server,
 		client.hello().protocol
 	);
 
-	let cursor_image = CursorImageData::load()?;
-	let gl = client.gl().clone();
-	// client.send_ready()?;
+	let mut monitor_id = client.monitor_ids().into_iter().next();
+	let mut spawned_sessions: Vec<Child> = Vec::new();
+	let mut cursor_state = CursorState::new();
 
-	let mut monitor_id = None;
-	let mut cursor_tracker = CursorTracker::new();
-	refresh_active_monitor(
-		&mut client,
-		&mut monitor_id,
-		&cursor_image,
-		&mut cursor_tracker,
-		false,
-	)?;
-	if let Some(active) = monitor_id.as_ref() {
-		println!("Using monitor {} for cursor demo", active);
-	} else {
-		println!("Waiting for monitor...");
+	if monitor_id.is_none() {
+		println!("Waiting for a monitor from Shift...");
+		while monitor_id.is_none() {
+			let events = pump_events(&mut client, true)?;
+			handle_events(
+				&mut client,
+				&events,
+				&mut monitor_id,
+				&session_client_bin,
+				&mut spawned_sessions,
+				&mut cursor_state,
+			)?;
+		}
 	}
 
-	let mut phase = 0.0f32;
+	if let Some(id) = &monitor_id {
+		println!("Using monitor {id} for playback");
+	}
+
+	let gl = client.gl().clone();
+	let renderer = GlRenderer::new(&gl)?;
+
+	let mut logo = LogoState::new();
 	let mut last_frame = Instant::now();
+	let mut fps_counter = FpsCounter::new();
 	loop {
-		if let Some(active) = monitor_id.clone() {
-			if let Some(info) = client.monitor_info(&active) {
-				let dt = last_frame.elapsed().as_secs_f32();
-				last_frame = Instant::now();
-				phase = (phase + dt * 0.35).fract();
-				match render_frame(&mut client, &gl, &active, phase) {
-					Ok(_) => {}
-					Err(TabClientError::NoFreeBuffers(_)) => {}
-					Err(TabClientError::UnknownMonitor(_)) => {
-						monitor_id = None;
-						refresh_active_monitor(
-							&mut client,
-							&mut monitor_id,
-							&cursor_image,
-							&mut cursor_tracker,
-							true,
-						)?;
-						continue;
-					}
-					Err(err) => return Err(err.into()),
-				}
-			} else {
-				monitor_id = None;
-				refresh_active_monitor(
-					&mut client,
-					&mut monitor_id,
-					&cursor_image,
-					&mut cursor_tracker,
-					true,
-				)?;
-			}
+		if monitor_id.is_none() {
+			let events = pump_events(&mut client, true)?;
+			handle_events(
+				&mut client,
+				&events,
+				&mut monitor_id,
+				&session_client_bin,
+				&mut spawned_sessions,
+				&mut cursor_state,
+			)?;
+			continue;
 		}
 
-		let blocking = monitor_id.is_none();
-		let events = pump_events(&mut client, blocking)?;
+		let active_monitor = monitor_id.clone().unwrap();
+		match client.acquire_frame(&active_monitor) {
+			Ok(frame) => {
+				let dt = last_frame.elapsed().as_secs_f32().max(1.0 / 480.0);
+				last_frame = Instant::now();
+			let logo_size = renderer.logo_size_for(frame.size());
+			logo.update(dt, frame.size(), logo_size);
+			renderer.draw_frame(&gl, &frame, &logo, logo_size);
+			client.swap_buffers(&active_monitor)?;
+			cursor_state.sync_to_server(&mut client, &active_monitor)?;
+			if let Some(fps) = fps_counter.tick() {
+				println!("client fps: {fps:.1}");
+			}
+			}
+			Err(TabClientError::NoFreeBuffers(_)) => {
+				let events = pump_events(&mut client, true)?;
+				handle_events(
+					&mut client,
+					&events,
+					&mut monitor_id,
+					&session_client_bin,
+					&mut spawned_sessions,
+					&mut cursor_state,
+				)?;
+				continue;
+			}
+			Err(TabClientError::UnknownMonitor(_)) => {
+				monitor_id = None;
+				continue;
+			}
+			Err(err) => return Err(err.into()),
+		}
+
+		let events = pump_events(&mut client, false)?;
 		handle_events(
 			&mut client,
 			&events,
 			&mut monitor_id,
-			&cursor_image,
-			&mut cursor_tracker,
+			&session_client_bin,
+			&mut spawned_sessions,
+			&mut cursor_state,
 		)?;
-		if monitor_id.is_none() {
-			println!("Waiting for monitor...");
-		}
-		thread::sleep(Duration::from_millis(8));
 	}
 }
 
-fn render_frame(
+fn handle_events(
 	client: &mut TabClient,
-	gl: &gl::Gles2,
-	monitor_id: &str,
-	phase: f32,
-) -> Result<(), TabClientError> {
-	match client.acquire_frame(monitor_id) {
-		Ok(frame) => {
-			draw_background(gl, &frame, phase);
-			client.swap_buffers(monitor_id)?;
-		}
-		Err(TabClientError::NoFreeBuffers(_)) => {}
-		Err(err) => return Err(err),
-	}
-	Ok(())
-}
-
-fn draw_background(gl: &gl::Gles2, target: &FrameTarget, phase: f32) {
-	let (width, height) = target.size();
-	let angle = phase * TWO_PI;
-	let r = angle.cos() * 0.5 + 0.5;
-	let g = angle.sin() * 0.5 + 0.5;
-	let b = (angle * 0.5).sin() * 0.5 + 0.5;
-	unsafe {
-		gl.BindFramebuffer(gl::FRAMEBUFFER, target.framebuffer());
-		gl.Viewport(0, 0, width, height);
-		gl.ClearColor(r, g, b, 1.0);
-		gl.Clear(gl::COLOR_BUFFER_BIT);
-	}
-}
-
-fn apply_cursor_image(
-	client: &mut TabClient,
-	monitor_id: &str,
-	cursor: &CursorImageData,
-) -> Result<(), TabClientError> {
-	println!(
-		"Uploading cursor {}x{} to monitor {}",
-		cursor.width, cursor.height, monitor_id
-	);
-	match client.set_cursor_framebuffer(
-		monitor_id,
-		cursor.width,
-		cursor.height,
-		cursor.hotspot_x,
-		cursor.hotspot_y,
-		&cursor.pixels,
-	) {
-		Ok(()) => {
-			println!("Cursor upload sent");
-			Ok(())
-		}
-		Err(err) => {
-			eprintln!("Cursor upload failed: {err}");
-			Err(err)
-		}
-	}
-}
-
-fn refresh_active_monitor(
-	client: &mut TabClient,
+	events: &[TabEvent],
 	monitor_id: &mut Option<String>,
-	cursor: &CursorImageData,
-	cursor_tracker: &mut CursorTracker,
-	force_reapply: bool,
-) -> Result<(), TabClientError> {
-	let mut ids = client.monitor_ids();
-	ids.sort();
-	if let Some(first) = ids.into_iter().next() {
-		let changed = monitor_id.as_deref() != Some(first.as_str());
-		if changed {
-			println!("Switching to monitor {}", first);
-		} else if force_reapply {
-			println!("Reapplying cursor to monitor {}", first);
-		}
-		if changed || force_reapply {
-			if let Some(info) = client.monitor_info(&first) {
-				cursor_tracker.set_monitor(info.width, info.height);
+	session_client_bin: &str,
+	spawned_sessions: &mut Vec<Child>,
+	cursor_state: &mut CursorState,
+) -> Result<(), Box<dyn Error>> {
+	for event in events {
+		match event {
+			TabEvent::MonitorAdded(info) => {
+				println!("Monitor added: {}", info.id);
+				if monitor_id.is_none() {
+					*monitor_id = Some(info.id.clone());
+					println!("Switched to monitor {}", info.id);
+				}
 			}
-			*monitor_id = Some(first.clone());
-			apply_cursor_image(client, &first, cursor)?;
+			TabEvent::MonitorRemoved(id) => {
+				println!("Monitor removed: {id}");
+				if monitor_id.as_deref() == Some(id) {
+					*monitor_id = None;
+				}
+			}
+			TabEvent::SessionState(state) => {
+				println!("Session state changed: {:?}", state.state);
+			}
+			TabEvent::Input(payload) => {
+				handle_input_event(client, payload, session_client_bin, spawned_sessions, cursor_state)?;
+			}
+			TabEvent::SessionCreated(payload) => {
+				if payload.session.role == SessionRole::Session {
+					println!(
+						"Session {} ready with token {}",
+						payload.session.id, payload.token
+					);
+					let child = spawn_session_client(session_client_bin, &payload.token)?;
+					spawned_sessions.push(child);
+				}
+			}
+			TabEvent::FrameDone { .. } => {}
+			TabEvent::Error(err) => {
+				eprintln!(
+					"[Shift error] code={} message={}",
+					err.code,
+					err.message.clone().unwrap_or_else(|| "unknown".into())
+				);
+			}
 		}
-	} else if monitor_id.take().is_some() {
-		cursor_tracker.clear();
-		println!("All monitors disconnected; waiting for reconnection");
 	}
 	Ok(())
 }
@@ -222,143 +214,403 @@ fn pump_events(client: &mut TabClient, blocking: bool) -> Result<Vec<TabEvent>, 
 	Ok(events)
 }
 
-fn handle_events(
+fn handle_input_event(
 	client: &mut TabClient,
-	events: &[TabEvent],
-	monitor_id: &mut Option<String>,
-	cursor: &CursorImageData,
-	cursor_tracker: &mut CursorTracker,
-) -> Result<(), TabClientError> {
-	let mut cursor_movement = (0, 0);
-	let mut monitor_event = false;
-	for event in events {
-		match event {
-			TabEvent::MonitorAdded(info) => {
-				println!("Monitor {} added", info.id);
-				monitor_event = true;
-			}
-			TabEvent::MonitorRemoved(id) => {
-				println!("Monitor {} removed", id);
-				monitor_event = true;
-			}
-			TabEvent::SessionState(state) => {
-				println!("Session {} is now {:?}", state.id, state.state);
-			}
-			TabEvent::Input(payload) => {
-				if let Some((x, y)) = cursor_tracker.update_from_input(payload) {
-					cursor_movement.0 = x;
-					cursor_movement.1 = y;
-				}
-			}
-			TabEvent::FrameDone { .. } => {}
-			TabEvent::SessionCreated(_) => {}
-			TabEvent::Error(err) => {
-				eprintln!(
-					"[Shift error] code={} message={}",
-					err.code,
-					err.message.clone().unwrap_or_else(|| "unknown".into())
-				);
+	payload: &InputEventPayload,
+	_session_client_bin: &str,
+	_spawned_sessions: &mut Vec<Child>,
+	cursor_state: &mut CursorState,
+) -> Result<(), Box<dyn Error>> {
+	match payload {
+		InputEventPayload::Key { key, state, .. } => {
+			println!("Key event: code={key} state={state:?}");
+			if *key == KEY_ENTER && *state == KeyState::Pressed {
+				println!("Enter pressed – requesting a Penger session");
+				request_session(client, "Penger Session")?;
 			}
 		}
-	}
-	if let Some(active) = monitor_id.clone() {
-		client.set_cursor_position(&active, cursor_movement.0, cursor_movement.1)?;
-	}
-
-	if monitor_event {
-		refresh_active_monitor(client, monitor_id, cursor, cursor_tracker, true)?;
+		InputEventPayload::PointerMotion {
+			device,
+			time_usec,
+			x,
+			y,
+			dx,
+			dy,
+		} => {
+			println!(
+				"Pointer motion: dev={device} time={time_usec} x={x:.2} y={y:.2} dx={dx:.3} dy={dy:.3}"
+			);
+			cursor_state.update_position(*x as i32, *y as i32);
+		}
+		InputEventPayload::PointerMotionAbsolute {
+			device,
+			time_usec,
+			x,
+			y,
+			x_transformed,
+			y_transformed,
+		} => {
+			println!(
+				"Pointer absolute: dev={device} time={time_usec} raw=({x:.2}, {y:.2}) transformed=({x_transformed:.2}, {y_transformed:.2})"
+			);
+			cursor_state.update_position(*x_transformed as i32, *y_transformed as i32);
+		}
+		_ => {}
 	}
 	Ok(())
 }
 
-struct CursorImageData {
-	width: u32,
-	height: u32,
-	hotspot_x: i32,
-	hotspot_y: i32,
-	pixels: Vec<u8>,
+fn request_session(client: &mut TabClient, display_name: &str) -> Result<(), Box<dyn Error>> {
+	let payload = SessionCreatePayload {
+		role: SessionRole::Session,
+		display_name: Some(display_name.to_string()),
+	};
+	let frame = TabMessageFrame::json(message_header::SESSION_CREATE, payload);
+	client.send(&frame)?;
+	Ok(())
 }
 
-impl CursorImageData {
-	fn load() -> Result<Self, Box<dyn Error>> {
-		let image = image::load_from_memory(CURSOR_BYTES)?.to_rgba8();
-		let (width, height) = image.dimensions();
-		let pixels = image.into_raw();
-		Ok(Self {
-			width,
-			height,
-			hotspot_x: (width / 2) as i32,
-			hotspot_y: (height / 2) as i32,
-			pixels,
-		})
-	}
+fn spawn_session_client(bin: &str, token: &str) -> Result<Child, Box<dyn Error>> {
+	let mut cmd = Command::new(bin);
+	cmd.env("SHIFT_SESSION_TOKEN", token);
+	cmd.stdout(Stdio::inherit());
+	cmd.stderr(Stdio::inherit());
+	let child = cmd.spawn()?;
+	Ok(child)
 }
 
-struct CursorTracker {
-	width: i32,
-	height: i32,
-	x: f64,
-	y: f64,
+struct LogoState {
+	pos: [f32; 2],
+	vel: [f32; 2],
+	color: usize,
 }
 
-impl CursorTracker {
+impl LogoState {
 	fn new() -> Self {
 		Self {
-			width: 0,
-			height: 0,
-			x: 0.0,
-			y: 0.0,
+			pos: [120.0, 90.0],
+			vel: [260.0, 190.0],
+			color: 0,
 		}
 	}
 
-	fn set_monitor(&mut self, width: i32, height: i32) {
-		self.width = width.max(1);
-		self.height = height.max(1);
-		self.x = (self.width / 2) as f64;
-		self.y = (self.height / 2) as f64;
-	}
+	fn update(&mut self, dt: f32, fb_size: (i32, i32), logo_size: (f32, f32)) {
+		let (width, height) = (fb_size.0 as f32, fb_size.1 as f32);
+		let (logo_w, logo_h) = logo_size;
+		let max_x = (width - logo_w).max(0.0);
+		let max_y = (height - logo_h).max(0.0);
 
-	fn clear(&mut self) {
-		self.width = 0;
-		self.height = 0;
-		self.x = 0.0;
-		self.y = 0.0;
-	}
+		self.pos[0] = (self.pos[0] + self.vel[0] * dt).clamp(0.0, max_x);
+		self.pos[1] = (self.pos[1] + self.vel[1] * dt).clamp(0.0, max_y);
 
-	fn update_from_input(&mut self, payload: &tab_protocol::InputEventPayload) -> Option<(i32, i32)> {
-		match payload {
-			tab_protocol::InputEventPayload::PointerMotion { x, y, .. } => self.add_position(*x, *y),
-			tab_protocol::InputEventPayload::PointerMotionAbsolute {
-				x_transformed,
-				y_transformed,
-				..
-			} => self.set_position(*x_transformed, *y_transformed),
-			tab_protocol::InputEventPayload::TouchMotion { contact, .. }
-			| tab_protocol::InputEventPayload::TouchDown { contact, .. } => {
-				self.set_position(contact.x_transformed, contact.y_transformed)
-			}
-			_ => None,
+		let mut bounced = false;
+		if self.pos[0] <= 0.0 || self.pos[0] >= max_x {
+			self.vel[0] = -self.vel[0];
+			bounced = true;
+		}
+		if self.pos[1] <= 0.0 || self.pos[1] >= max_y {
+			self.vel[1] = -self.vel[1];
+			bounced = true;
+		}
+		if bounced {
+			self.color = (self.color + 1) % COLORS.len();
 		}
 	}
 
-	fn set_position(&mut self, x: f64, y: f64) -> Option<(i32, i32)> {
-		if self.width == 0 || self.height == 0 {
-			return None;
-		}
-		self.x = x.clamp(0., self.width as _);
-		self.y = y.clamp(0., self.height as _);
-		Some((self.x as _, self.y as _))
+	fn tint(&self) -> [f32; 3] {
+		COLORS[self.color]
 	}
-	fn add_position(&mut self, x: f64, y: f64) -> Option<(i32, i32)> {
-		if self.width == 0 || self.height == 0 {
-			return None;
+}
+
+struct GlRenderer {
+	program: u32,
+	texture: u32,
+	uni_resolution: i32,
+	uni_position: i32,
+	uni_size: i32,
+	uni_tint: i32,
+	texture_dims: (u32, u32),
+}
+
+struct FpsCounter {
+	last: Instant,
+	frames: u32,
+}
+
+impl FpsCounter {
+	fn new() -> Self {
+		Self {
+			last: Instant::now(),
+			frames: 0,
 		}
-		self.x += x.clamp(0., self.width as _);
-		self.y += y.clamp(0., self.height as _);
-		Some((self.x as _, self.y as _))
 	}
 
-	fn current(&self) -> (i32, i32) {
-		(self.x as _, self.y as _)
+	fn tick(&mut self) -> Option<f32> {
+		self.frames += 1;
+		let elapsed = self.last.elapsed();
+		if elapsed >= Duration::from_secs(1) {
+			let fps = self.frames as f32 / elapsed.as_secs_f32();
+			self.frames = 0;
+			self.last = Instant::now();
+			Some(fps)
+		} else {
+			None
+		}
 	}
+}
+
+struct CursorState {
+	x: i32,
+	y: i32,
+	cursor_image: Vec<u8>, // ARGB8888 format
+	cursor_sent: bool,
+}
+
+impl CursorState {
+	fn new() -> Self {
+		Self {
+			x: 0,
+			y: 0,
+			cursor_image: vec![0xff; 16 * 16*4], // white 16x16 cursor
+			cursor_sent: false,
+		}
+	}
+
+	fn update_position(&mut self, x: i32, y: i32) {
+		self.x = x;
+		self.y = y;
+	}
+
+	fn sync_to_server(&mut self, client: &mut TabClient, monitor_id: &str) -> Result<(), Box<dyn Error>> {
+		// Send cursor framebuffer on first sync
+		if !self.cursor_sent {
+			client.set_cursor_framebuffer(
+				monitor_id,
+				16,
+				16,
+				0,
+				0,
+				&self.cursor_image,
+			)?;
+			self.cursor_sent = true;
+		}
+
+		// Always update cursor position
+		client.set_cursor_position(monitor_id, self.x, self.y)?;
+
+		Ok(())
+	}
+}
+
+
+impl GlRenderer {
+	fn new(gl: &gl::Gles2) -> Result<Self, Box<dyn Error>> {
+		unsafe {
+			gl.Enable(gl::BLEND);
+			gl.BlendFunc(gl::SRC_ALPHA, gl::ONE_MINUS_SRC_ALPHA);
+		}
+
+		let vert = compile_shader(
+			gl,
+			gl::VERTEX_SHADER,
+			r#"
+attribute vec2 aPos;
+attribute vec2 aUv;
+varying vec2 vUv;
+uniform vec2 uResolution;
+uniform vec2 uPosition;
+uniform vec2 uSize;
+void main() {
+    vec2 scaled = uPosition + aPos * uSize;
+    vec2 clip = vec2(
+        (scaled.x / uResolution.x) * 2.0 - 1.0,
+        1.0 - (scaled.y / uResolution.y) * 2.0
+    );
+    gl_Position = vec4(clip, 0.0, 1.0);
+    vUv = aUv;
+}
+"#,
+		)?;
+		let frag = compile_shader(
+			gl,
+			gl::FRAGMENT_SHADER,
+			r#"
+precision mediump float;
+varying vec2 vUv;
+uniform sampler2D uTexture;
+uniform vec3 uTint;
+void main() {
+    vec4 tex = texture2D(uTexture, vUv);
+    gl_FragColor = vec4((vec3(1.0) - tex.rgb) * uTint, tex.a);
+}
+"#,
+		)?;
+		let program = link_program(gl, vert, frag)?;
+
+		let attr_pos = unsafe { gl.GetAttribLocation(program, b"aPos\0".as_ptr() as _) };
+		let attr_uv = unsafe { gl.GetAttribLocation(program, b"aUv\0".as_ptr() as _) };
+		let uni_resolution = unsafe { gl.GetUniformLocation(program, b"uResolution\0".as_ptr() as _) };
+		let uni_position = unsafe { gl.GetUniformLocation(program, b"uPosition\0".as_ptr() as _) };
+		let uni_size = unsafe { gl.GetUniformLocation(program, b"uSize\0".as_ptr() as _) };
+		let uni_tint = unsafe { gl.GetUniformLocation(program, b"uTint\0".as_ptr() as _) };
+		let uni_tex = unsafe { gl.GetUniformLocation(program, b"uTexture\0".as_ptr() as _) };
+
+		let mut vbo = 0;
+		unsafe { gl.GenBuffers(1, &mut vbo) };
+		const VERTICES: [f32; 16] = [
+			0.0, 0.0, 0.0, 0.0, //
+			1.0, 0.0, 1.0, 0.0, //
+			0.0, 1.0, 0.0, 1.0, //
+			1.0, 1.0, 1.0, 1.0, //
+		];
+		unsafe {
+			gl.BindBuffer(gl::ARRAY_BUFFER, vbo);
+			gl.BufferData(
+				gl::ARRAY_BUFFER,
+				(VERTICES.len() * std::mem::size_of::<f32>()) as isize,
+				VERTICES.as_ptr() as _,
+				gl::STATIC_DRAW,
+			);
+			let stride = (4 * std::mem::size_of::<f32>()) as i32;
+			gl.EnableVertexAttribArray(attr_pos as u32);
+			gl.VertexAttribPointer(
+				attr_pos as u32,
+				2,
+				gl::FLOAT,
+				gl::FALSE,
+				stride,
+				std::ptr::null(),
+			);
+			gl.EnableVertexAttribArray(attr_uv as u32);
+			gl.VertexAttribPointer(
+				attr_uv as u32,
+				2,
+				gl::FLOAT,
+				gl::FALSE,
+				stride,
+				(2 * std::mem::size_of::<f32>()) as *const _,
+			);
+		}
+
+		let image = image::load_from_memory(DVD_BYTES)?.to_rgba8();
+		let texture_dims = image.dimensions();
+		let mut texture = 0;
+		unsafe {
+			gl.GenTextures(1, &mut texture);
+			gl.ActiveTexture(gl::TEXTURE0);
+			gl.BindTexture(gl::TEXTURE_2D, texture);
+			gl.TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::LINEAR as i32);
+			gl.TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::LINEAR as i32);
+			gl.TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_S, gl::CLAMP_TO_EDGE as i32);
+			gl.TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_T, gl::CLAMP_TO_EDGE as i32);
+			gl.TexImage2D(
+				gl::TEXTURE_2D,
+				0,
+				gl::RGBA as i32,
+				texture_dims.0 as i32,
+				texture_dims.1 as i32,
+				0,
+				gl::RGBA,
+				gl::UNSIGNED_BYTE,
+				image.as_ptr() as _,
+			);
+			gl.UseProgram(program);
+			gl.Uniform1i(uni_tex, 0);
+		}
+
+		Ok(Self {
+			program,
+			texture,
+			uni_resolution,
+			uni_position,
+			uni_size,
+			uni_tint,
+			texture_dims,
+		})
+	}
+
+	fn logo_size_for(&self, framebuffer: (i32, i32)) -> (f32, f32) {
+		let (w, h) = (framebuffer.0 as f32, framebuffer.1 as f32);
+		let aspect = self.texture_dims.0 as f32 / self.texture_dims.1 as f32;
+		let mut desired_w = (w * 0.25).clamp(80.0, w * 0.9);
+		let mut desired_h = desired_w / aspect;
+		if desired_h > h * 0.5 {
+			desired_h = h * 0.5;
+			desired_w = desired_h * aspect;
+		}
+		(desired_w, desired_h)
+	}
+
+	fn draw_frame(
+		&self,
+		gl: &gl::Gles2,
+		target: &FrameTarget,
+		logo: &LogoState,
+		logo_size: (f32, f32),
+	) {
+		let (w, h) = target.size();
+		unsafe {
+			gl.BindFramebuffer(gl::FRAMEBUFFER, target.framebuffer());
+			gl.Viewport(0, 0, w, h);
+			gl.ClearColor(0.2, 0.2, 0.2, 1.0);
+			gl.Clear(gl::COLOR_BUFFER_BIT);
+			gl.UseProgram(self.program);
+			gl.ActiveTexture(gl::TEXTURE0);
+			gl.BindTexture(gl::TEXTURE_2D, self.texture);
+			gl.Uniform2f(self.uni_resolution, w as f32, h as f32);
+			gl.Uniform2f(self.uni_position, logo.pos[0], logo.pos[1]);
+			gl.Uniform2f(self.uni_size, logo_size.0, logo_size.1);
+			let tint = logo.tint();
+			gl.Uniform3f(self.uni_tint, tint[0], tint[1], tint[2]);
+			gl.DrawArrays(gl::TRIANGLE_STRIP, 0, 4);
+		}
+	}
+}
+
+fn compile_shader(gl: &gl::Gles2, ty: u32, source: &str) -> Result<u32, Box<dyn Error>> {
+	let shader = unsafe { gl.CreateShader(ty) };
+	let c_source = std::ffi::CString::new(source)?;
+	unsafe {
+		gl.ShaderSource(shader, 1, &c_source.as_ptr(), std::ptr::null());
+		gl.CompileShader(shader);
+		let mut status = 0;
+		gl.GetShaderiv(shader, gl::COMPILE_STATUS, &mut status);
+		if status == 0 {
+			let mut len = 0;
+			gl.GetShaderiv(shader, gl::INFO_LOG_LENGTH, &mut len);
+			let mut log = vec![0u8; len as usize];
+			gl.GetShaderInfoLog(shader, len, std::ptr::null_mut(), log.as_mut_ptr() as _);
+			return Err(
+				format!(
+					"Shader compilation failed: {}",
+					String::from_utf8_lossy(&log)
+				)
+				.into(),
+			);
+		}
+	}
+	Ok(shader)
+}
+
+fn link_program(gl: &gl::Gles2, vert: u32, frag: u32) -> Result<u32, Box<dyn Error>> {
+	let program = unsafe { gl.CreateProgram() };
+	unsafe {
+		gl.AttachShader(program, vert);
+		gl.AttachShader(program, frag);
+		gl.LinkProgram(program);
+		let mut status = 0;
+		gl.GetProgramiv(program, gl::LINK_STATUS, &mut status);
+		if status == 0 {
+			let mut len = 0;
+			gl.GetProgramiv(program, gl::INFO_LOG_LENGTH, &mut len);
+			let mut log = vec![0u8; len as usize];
+			gl.GetProgramInfoLog(program, len, std::ptr::null_mut(), log.as_mut_ptr() as _);
+			return Err(format!("Program link failed: {}", String::from_utf8_lossy(&log)).into());
+		}
+		gl.DetachShader(program, vert);
+		gl.DetachShader(program, frag);
+		gl.DeleteShader(vert);
+		gl.DeleteShader(frag);
+	}
+	Ok(program)
 }

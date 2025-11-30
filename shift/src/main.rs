@@ -7,6 +7,7 @@ use tracing_subscriber::EnvFilter;
 mod macros;
 mod animations;
 mod app;
+mod cursor_sync;
 mod dma_buf_importer;
 mod egl;
 mod error;
