@@ -78,14 +78,15 @@ const DEFAULT_RENDER_NODES: &[&str] = &[
 ];
 
 #[derive(Debug, Clone)]
-pub struct FrameTarget {
+pub struct FrameTarget<'dma> {
 	framebuffer: u32,
 	texture: u32,
 	width: i32,
 	height: i32,
+	dmabuf: BorrowedDmabuf<'dma>,
 }
 
-impl FrameTarget {
+impl FrameTarget<'_> {
 	pub fn framebuffer(&self) -> u32 {
 		self.framebuffer
 	}
@@ -96,6 +97,9 @@ impl FrameTarget {
 
 	pub fn size(&self) -> (i32, i32) {
 		(self.width, self.height)
+	}
+	pub fn dmabuf(&self) -> &BorrowedDmabuf<'_> {
+		&self.dmabuf
 	}
 }
 
@@ -333,6 +337,7 @@ impl TabClient {
 	}
 
 	pub fn gl(&self) -> &Gles2 {
+		self.gfx.ensure_make_current().ok();
 		&self.gfx.gl
 	}
 
@@ -341,7 +346,9 @@ impl TabClient {
 		ids.sort();
 		ids
 	}
-
+	pub fn monitor_info(&self, monitor_id: &str) -> Option<MonitorInfo> {
+		self.outputs.get(monitor_id).map(|output| output.info.clone())
+	}
 	pub fn authenticate(
 		&mut self,
 		token: impl Into<String>,
@@ -565,6 +572,9 @@ impl TabClient {
 		}
 		Ok(events)
 	}
+	pub fn drm_fd(&self) -> RawFd {
+		self.gfx.drm_fd()
+	}
 }
 
 impl Drop for TabClient {
@@ -573,7 +583,7 @@ impl Drop for TabClient {
 	}
 }
 
-mod c_bindings;
+pub mod c_bindings;
 
 struct GraphicsContext {
 	egl: kegl::DynamicInstance<kegl::EGL1_5>,
@@ -581,7 +591,7 @@ struct GraphicsContext {
 	context: kegl::Context,
 	gl: Gles2,
 	egl_ext: egl_sys::Egl,
-	_gbm_device: gbm::Device<File>,
+	gbm_device: gbm::Device<File>,
 }
 
 impl GraphicsContext {
@@ -608,10 +618,12 @@ impl GraphicsContext {
 			context,
 			gl,
 			egl_ext,
-			_gbm_device: gbm_device,
+			gbm_device,
 		})
 	}
-
+	pub fn drm_fd(&self) -> RawFd {
+		self.gbm_device.as_raw_fd()
+	}
 	fn initialize_on_display(
 		egl: &kegl::DynamicInstance<kegl::EGL1_5>,
 		display: kegl::Display,
@@ -657,7 +669,11 @@ impl GraphicsContext {
 		});
 		Ok((context, gl))
 	}
-
+	fn ensure_make_current(&self) -> Result<(), TabClientError> {
+		self.egl
+			.make_current(self.display, None, None, Some(self.context))
+			.map_err(|err| TabClientError::Egl(err.to_string()))
+	}
 	fn initialize_with_gbm(
 		egl: &kegl::DynamicInstance<kegl::EGL1_5>,
 		egl_ext: &egl_sys::Egl,
@@ -710,6 +726,7 @@ impl GraphicsContext {
 	}
 
 	fn create_fence(&self) -> Result<SyncHandle, TabClientError> {
+		self.ensure_make_current()?;
 		let attributes = [egl_sys::NONE as egl_sys::types::EGLAttrib];
 		let sync = unsafe {
 			self.egl_ext.CreateSync(
@@ -762,8 +779,8 @@ impl Output {
 		})
 	}
 
-	fn acquire_frame(&mut self) -> Result<FrameTarget, TabClientError> {
-		let Some(index) = self.available.pop_front() else {
+	fn acquire_frame(&mut self) -> Result<FrameTarget<'_>, TabClientError> {
+		let Some(&index) = self.available.front() else {
 			return Err(TabClientError::NoFreeBuffers(self.info.id.clone()));
 		};
 		self.drawing = Some(index);
@@ -773,11 +790,13 @@ impl Output {
 			texture: buf.texture,
 			width: self.info.width,
 			height: self.info.height,
+			dmabuf: (&buf.dmabuf).into(),
 		})
 	}
 
 	fn begin_swap(&mut self) -> Option<usize> {
 		let idx = self.drawing.take()?;
+		self.available.retain(|&idx1| idx != idx1);
 		self.in_flight.push_back(idx);
 		Some(idx)
 	}
@@ -794,7 +813,7 @@ impl Output {
 	fn export_dmabufs(&self) -> Result<[Dmabuf; 2], TabClientError> {
 		let mut descs = Vec::new();
 		for buf in &self.buffers {
-			descs.push(buf.export_dmabuf()?);
+			descs.push(buf.dmabuf.clone());
 		}
 		Ok([descs.remove(0), descs.remove(0)])
 	}
@@ -807,10 +826,12 @@ struct OutputBuffer {
 	gl: Gles2,
 	egl_ext: egl_sys::Egl,
 	display: kegl::Display,
+	dmabuf: Dmabuf
 }
 
 impl OutputBuffer {
 	fn new(info: &MonitorInfo, gfx: &GraphicsContext) -> Result<Self, TabClientError> {
+		gfx.ensure_make_current()?;
 		let mut texture = 0;
 		let mut framebuffer = 0;
 		let gl = gfx.gl.clone();
@@ -854,6 +875,7 @@ impl OutputBuffer {
 			return Err(TabClientError::Egl("eglCreateImageKHR failed".into()));
 		}
 		Ok(Self {
+			dmabuf: Self::export_dmabuf(&image, &egl_ext, &gfx.display)?,
 			texture,
 			framebuffer,
 			image,
@@ -863,13 +885,14 @@ impl OutputBuffer {
 		})
 	}
 
-	fn export_dmabuf(&self) -> Result<Dmabuf, TabClientError> {
+	fn export_dmabuf(image: &egl_sys::types::EGLImageKHR, egl_ext: &egl_sys::Egl, display: &kegl::Display) -> Result<Dmabuf, TabClientError> {
 		let mut fourcc = 0;
 		let mut num_planes = 0;
+		
 		let query = unsafe {
-			self.egl_ext.ExportDMABUFImageQueryMESA(
-				self.display.as_ptr(),
-				self.image,
+			egl_ext.ExportDMABUFImageQueryMESA(
+				display.as_ptr(),
+				*image,
 				&mut fourcc,
 				&mut num_planes,
 				std::ptr::null_mut(),
@@ -884,9 +907,9 @@ impl OutputBuffer {
 		let mut stride = 0;
 		let mut offset = 0;
 		let exported = unsafe {
-			self.egl_ext.ExportDMABUFImageMESA(
-				self.display.as_ptr(),
-				self.image,
+			egl_ext.ExportDMABUFImageMESA(
+				display.as_ptr(),
+				*image,
 				&mut fd,
 				&mut stride,
 				&mut offset,
@@ -923,8 +946,8 @@ impl Drop for OutputBuffer {
 		}
 	}
 }
-
-struct Dmabuf {
+#[repr(C)]
+pub struct Dmabuf {
 	fd: RawFd,
 	stride: i32,
 	offset: i32,
@@ -934,5 +957,37 @@ struct Dmabuf {
 impl Drop for Dmabuf {
 	fn drop(&mut self) {
 		let _ = close(self.fd);
+	}
+}
+impl Clone for Dmabuf {
+	fn clone(&self) -> Self {
+		// Duplicate the fd
+		let new_fd = nix::unistd::dup(self.fd).unwrap_or(-1);
+		Self {
+			fd: new_fd,
+			stride: self.stride,
+			offset: self.offset,
+			fourcc: self.fourcc,
+		}
+	}
+}
+
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+pub struct BorrowedDmabuf<'a> {
+	pub fd: BorrowedFd<'a>,
+	pub stride: i32,
+	pub offset: i32,
+	pub fourcc: i32,
+}
+
+impl<'a> From<&'a Dmabuf> for BorrowedDmabuf<'a> {
+	fn from(dmabuf: &'a Dmabuf) -> Self {
+		Self {
+			fd: unsafe { BorrowedFd::borrow_raw(dmabuf.fd) },
+			stride: dmabuf.stride,
+			offset: dmabuf.offset,
+			fourcc: dmabuf.fourcc,
+		}
 	}
 }

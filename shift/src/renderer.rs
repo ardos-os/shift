@@ -24,7 +24,12 @@ pub enum RendererError {
 }
 
 const QUAD_POSITIONS: [f32; 8] = [-1.0, -1.0, 1.0, -1.0, -1.0, 1.0, 1.0, 1.0];
-const QUAD_TEX_COORDS: [f32; 8] = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+const QUAD_TEX_COORDS: [f32; 8] = [
+	0.0, 0.0,
+	1.0, 0.0,
+	0.0, 1.0,
+	1.0, 1.0
+];
 const MAX_BLUR_PASSES: usize = 5;
 const MIN_KAWASE_RADIUS: f32 = 2.0;
 const MAX_KAWASE_RADIUS: f32 = 20.0;
@@ -59,12 +64,13 @@ out vec4 frag_color;
 
 
 void main() {
-	vec4 base = texture(u_texture, v_tex_coord);
+	vec2 flipped_uv = vec2(v_tex_coord.x, 1.0 - v_tex_coord.y);
+	vec4 base = texture(u_texture, flipped_uv);
 	if (u_tween == 0.0) {
 		frag_color = base;
 		return;
 	}
-	vec4 base2 = texture(u_texture2, v_tex_coord);
+	vec4 base2 = texture(u_texture2, flipped_uv);
 	vec4 tweened = mix(base, base2, u_tween);
 	frag_color = tweened;
 }
