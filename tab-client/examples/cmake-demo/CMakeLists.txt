@@ -26,5 +26,5 @@ find_package(TabClient REQUIRED)
 
 add_executable(tab_client_demo main.cpp)
 add_dependencies(tab_client_demo tab_client)
-target_link_libraries(tab_client_demo PRIVATE TabClient::TabClient)
+target_link_libraries(tab_client_demo PRIVATE TabClient::TabClient GL)
 target_include_directories(tab_client_demo PRIVATE ${TabClient_INCLUDE_DIR})
