@@ -222,6 +222,8 @@ fn handle_input_event(
 			y,
 			dx,
 			dy,
+			unaccel_dx,
+			unaccel_dy
 		} => {
 			println!(
 				"Pointer motion: dev={device} time={time_usec} x={x:.2} y={y:.2} dx={dx:.3} dy={dy:.3}"

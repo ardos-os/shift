@@ -13,5 +13,6 @@ nix = { workspace = true }
 thiserror = { workspace = true }
 libc = "0.2"
 input = "0.9.1"
+linux-raw-sys = { version = "0.12.0", default-features = false, features = ["ioctl"] }
 [build-dependencies]
 gl_generator = "0.14"

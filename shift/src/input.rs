@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::io::ErrorKind;
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::fs::OpenOptionsExt;
@@ -25,7 +25,8 @@ use input::event::touch::{
 };
 use input::event::{Event, EventTrait};
 use input::{Device, Libinput, LibinputInterface};
-use libc::{O_RDONLY, O_RDWR, O_WRONLY};
+use libc::{O_RDONLY, O_RDWR, O_WRONLY, SIGUSR1};
+use linux_raw_sys::ioctl::VT_SETMODE;
 use tab_protocol::{
 	AxisOrientation, AxisSource, ButtonState, InputEventPayload, KeyState, SwitchState, SwitchType,
 	TouchContact,
@@ -42,13 +43,24 @@ pub struct InputManager {
 	next_device_id: u32,
 }
 
+#[repr(C)]
+struct vt_mode {
+    mode: i8,
+    waitv: i8,
+    relsig: i16,
+    acqsig: i16,
+    frsig: i16,
+}
+
 impl InputManager {
+	
 	pub fn new() -> Result<Self, ShiftError> {
 		let mut ctx = Libinput::new_with_udev(ShiftInputInterface::default());
 		ctx
 			.udev_assign_seat("seat0")
 			.map_err(|_| ShiftError::Libinput("failed to assign libinput seat".into()))?;
 		
+		Self::disable_vt_switching();
 		Ok(Self {
 			ctx,
 			cursor: CursorState::default(),
@@ -57,7 +69,42 @@ impl InputManager {
 			next_device_id: 1,
 		})
 	}
+	// Disables VT switching for security
+	// Shift is meant to completely replace the traditional virtual terminal system,
+	// so we disable VT switching to prevent users from switching away from Shift
+	// Switching sessions should be done through Shift
+	fn disable_vt_switching() {
 
+		if let Ok(console_fd) = OpenOptions::new().read(true).write(true).open("/dev/console") {
+			unsafe {
+				// Set VT mode to userspace mode so it sends a signal everytime a VT switch is attempted
+				if libc::ioctl(console_fd.as_raw_fd(), VT_SETMODE.into(), &vt_mode {
+					mode: 1,
+					waitv: 0,
+					relsig: SIGUSR1 as i16,
+					acqsig: SIGUSR1 as i16,
+					frsig: 0,
+				}) == 0 {
+					// but when we actually receive a signal, we completely ignore it
+					// effectively locking the user into the current VT
+					libc::sigaction(
+						SIGUSR1,
+						&libc::sigaction {
+							sa_sigaction: libc::SIG_IGN,
+							sa_mask: std::mem::zeroed(),
+							sa_flags: 0,
+							sa_restorer: None,
+						},
+						std::ptr::null_mut(),
+					);
+				} else {
+					tracing::warn!("Failed to set VT mode on /dev/console");
+				}
+			}
+		} else {
+			tracing::warn!("Failed to open /dev/console to set VT mode");
+		}
+	}
 	pub fn fd(&self) -> RawFd {
 		self.ctx.as_raw_fd()
 	}
@@ -121,6 +168,9 @@ impl InputManager {
 		match event {
 			DeviceEvent::Added(ev) => {
 				let device_id = self.device_id_for(&ev.device());
+				ev.device().config_tap_set_drag_lock_enabled(true).ok();
+				ev.device().config_tap_set_enabled(true).ok();
+				
 				trace!(device_id, "Device added");
 			}
 			DeviceEvent::Removed(ev) => {
