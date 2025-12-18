@@ -8,7 +8,10 @@ use std::path::Path;
 
 use input::AsRaw;
 use input::event::device::DeviceEvent;
-use input::event::gesture::{GestureEndEvent, GestureEvent, GestureEventCoordinates, GestureEventTrait, GestureHoldEvent, GesturePinchEvent, GesturePinchEventTrait, GestureSwipeEvent};
+use input::event::gesture::{
+	GestureEndEvent, GestureEvent, GestureEventCoordinates, GestureEventTrait, GestureHoldEvent,
+	GesturePinchEvent, GesturePinchEventTrait, GestureSwipeEvent,
+};
 use input::event::keyboard::{KeyState as LibinputKeyState, KeyboardEvent, KeyboardEventTrait};
 #[allow(deprecated)]
 use input::event::pointer::{
@@ -171,20 +174,17 @@ impl InputManager {
 					handler(payload);
 				}
 			}
-			
+
 			other => {
 				trace!(?other, "Unhandled libinput event");
 			}
 		}
 	}
-	fn convert_gesture_event(
-		&mut self,
-		event: GestureEvent,
-	) -> Option<InputEventPayload> {
+	fn convert_gesture_event(&mut self, event: GestureEvent) -> Option<InputEventPayload> {
 		use GestureEvent as G;
-		use GestureSwipeEvent as S;
-		use GesturePinchEvent as P;
 		use GestureHoldEvent as H;
+		use GesturePinchEvent as P;
+		use GestureSwipeEvent as S;
 
 		match event {
 			// ======================
@@ -304,7 +304,7 @@ impl InputManager {
 			PointerEvent::ScrollWheel(ev) => self.pointer_scroll_wheel(ev),
 			PointerEvent::ScrollFinger(ev) => self.pointer_scroll_finger(ev),
 			PointerEvent::ScrollContinuous(ev) => self.pointer_scroll_continuous(ev),
-			
+
 			_ => Vec::new(),
 		}
 	}

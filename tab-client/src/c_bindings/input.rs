@@ -24,15 +24,15 @@ pub enum TabInputEventKind {
 	TabInputTabletPadStrip = 18,
 	TabInputSwitchToggle = 19,
 	TabInputGestureSwipeBegin = 20,
-    TabInputGestureSwipeUpdate = 21,
-    TabInputGestureSwipeEnd = 22,
+	TabInputGestureSwipeUpdate = 21,
+	TabInputGestureSwipeEnd = 22,
 
-    TabInputGesturePinchBegin = 23,
-    TabInputGesturePinchUpdate = 24,
-    TabInputGesturePinchEnd = 25,
+	TabInputGesturePinchBegin = 23,
+	TabInputGesturePinchUpdate = 24,
+	TabInputGesturePinchEnd = 25,
 
-    TabInputGestureHoldBegin = 26,
-    TabInputGestureHoldEnd = 27,
+	TabInputGestureHoldBegin = 26,
+	TabInputGestureHoldEnd = 27,
 }
 
 // ============================================================================
@@ -307,69 +307,69 @@ pub struct TabInputSwitchToggle {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct TabInputGestureSwipeBegin {
-    pub device: u32,
-    pub time_usec: u64,
-    pub fingers: u32,
+	pub device: u32,
+	pub time_usec: u64,
+	pub fingers: u32,
 }
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct TabInputGestureSwipeUpdate {
-    pub device: u32,
-    pub time_usec: u64,
-    pub fingers: u32,
-    pub dx: f64,
-    pub dy: f64,
+	pub device: u32,
+	pub time_usec: u64,
+	pub fingers: u32,
+	pub dx: f64,
+	pub dy: f64,
 }
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct TabInputGestureSwipeEnd {
-    pub device: u32,
-    pub time_usec: u64,
-    pub cancelled: bool,
+	pub device: u32,
+	pub time_usec: u64,
+	pub cancelled: bool,
 }
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct TabInputGesturePinchBegin {
-    pub device: u32,
-    pub time_usec: u64,
-    pub fingers: u32,
+	pub device: u32,
+	pub time_usec: u64,
+	pub fingers: u32,
 }
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct TabInputGesturePinchUpdate {
-    pub device: u32,
-    pub time_usec: u64,
-    pub fingers: u32,
-    pub dx: f64,
-    pub dy: f64,
-    pub scale: f64,
-    pub rotation: f64,
+	pub device: u32,
+	pub time_usec: u64,
+	pub fingers: u32,
+	pub dx: f64,
+	pub dy: f64,
+	pub scale: f64,
+	pub rotation: f64,
 }
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct TabInputGesturePinchEnd {
-    pub device: u32,
-    pub time_usec: u64,
-    pub cancelled: bool,
+	pub device: u32,
+	pub time_usec: u64,
+	pub cancelled: bool,
 }
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct TabInputGestureHoldBegin {
-    pub device: u32,
-    pub time_usec: u64,
-    pub fingers: u32,
+	pub device: u32,
+	pub time_usec: u64,
+	pub fingers: u32,
 }
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct TabInputGestureHoldEnd {
-    pub device: u32,
-    pub time_usec: u64,
-    pub cancelled: bool,
+	pub device: u32,
+	pub time_usec: u64,
+	pub cancelled: bool,
 }
 
 // ============================================================================
@@ -398,16 +398,16 @@ pub union TabInputEventData {
 	pub tablet_pad_strip: TabInputTabletPadStrip,
 	pub switch_toggle: TabInputSwitchToggle,
 
-    pub gesture_swipe_begin: TabInputGestureSwipeBegin,
-    pub gesture_swipe_update: TabInputGestureSwipeUpdate,
-    pub gesture_swipe_end: TabInputGestureSwipeEnd,
+	pub gesture_swipe_begin: TabInputGestureSwipeBegin,
+	pub gesture_swipe_update: TabInputGestureSwipeUpdate,
+	pub gesture_swipe_end: TabInputGestureSwipeEnd,
 
-    pub gesture_pinch_begin: TabInputGesturePinchBegin,
-    pub gesture_pinch_update: TabInputGesturePinchUpdate,
-    pub gesture_pinch_end: TabInputGesturePinchEnd,
+	pub gesture_pinch_begin: TabInputGesturePinchBegin,
+	pub gesture_pinch_update: TabInputGesturePinchUpdate,
+	pub gesture_pinch_end: TabInputGesturePinchEnd,
 
-    pub gesture_hold_begin: TabInputGestureHoldBegin,
-    pub gesture_hold_end: TabInputGestureHoldEnd,
+	pub gesture_hold_begin: TabInputGestureHoldBegin,
+	pub gesture_hold_end: TabInputGestureHoldEnd,
 }
 
 #[repr(C)]
@@ -420,7 +420,7 @@ pub struct TabInputEvent {
 pub(super) fn convert_input_event(payload: &InputEventPayload) -> TabInputEvent {
 	let kind: TabInputEventKind;
 	let mut data: TabInputEventData = unsafe { std::mem::zeroed() };
-	
+
 	match payload {
 		InputEventPayload::PointerMotion {
 			device,
@@ -793,142 +793,140 @@ pub(super) fn convert_input_event(payload: &InputEventPayload) -> TabInputEvent 
 				};
 			}
 		}
-		        // ======================
-        // Gestures
-        // ======================
+		// ======================
+		// Gestures
+		// ======================
+		InputEventPayload::GestureSwipeBegin {
+			device,
+			time_usec,
+			fingers,
+		} => {
+			kind = TabInputEventKind::TabInputGestureSwipeBegin;
+			unsafe {
+				data.gesture_swipe_begin = TabInputGestureSwipeBegin {
+					device: *device,
+					time_usec: *time_usec,
+					fingers: *fingers,
+				};
+			}
+		}
 
-        InputEventPayload::GestureSwipeBegin {
-            device,
-            time_usec,
-            fingers,
-        } => {
-            kind = TabInputEventKind::TabInputGestureSwipeBegin;
-            unsafe {
-                data.gesture_swipe_begin = TabInputGestureSwipeBegin {
-                    device: *device,
-                    time_usec: *time_usec,
-                    fingers: *fingers,
-                };
-            }
-        }
+		InputEventPayload::GestureSwipeUpdate {
+			device,
+			time_usec,
+			fingers,
+			dx,
+			dy,
+		} => {
+			kind = TabInputEventKind::TabInputGestureSwipeUpdate;
+			unsafe {
+				data.gesture_swipe_update = TabInputGestureSwipeUpdate {
+					device: *device,
+					time_usec: *time_usec,
+					fingers: *fingers,
+					dx: *dx,
+					dy: *dy,
+				};
+			}
+		}
 
-        InputEventPayload::GestureSwipeUpdate {
-            device,
-            time_usec,
-            fingers,
-            dx,
-            dy,
-        } => {
-            kind = TabInputEventKind::TabInputGestureSwipeUpdate;
-            unsafe {
-                data.gesture_swipe_update = TabInputGestureSwipeUpdate {
-                    device: *device,
-                    time_usec: *time_usec,
-                    fingers: *fingers,
-                    dx: *dx,
-                    dy: *dy,
-                };
-            }
-        }
+		InputEventPayload::GestureSwipeEnd {
+			device,
+			time_usec,
+			cancelled,
+		} => {
+			kind = TabInputEventKind::TabInputGestureSwipeEnd;
+			unsafe {
+				data.gesture_swipe_end = TabInputGestureSwipeEnd {
+					device: *device,
+					time_usec: *time_usec,
+					cancelled: *cancelled,
+				};
+			}
+		}
 
-        InputEventPayload::GestureSwipeEnd {
-            device,
-            time_usec,
-            cancelled,
-        } => {
-            kind = TabInputEventKind::TabInputGestureSwipeEnd;
-            unsafe {
-                data.gesture_swipe_end = TabInputGestureSwipeEnd {
-                    device: *device,
-                    time_usec: *time_usec,
-                    cancelled: *cancelled,
-                };
-            }
-        }
+		InputEventPayload::GesturePinchBegin {
+			device,
+			time_usec,
+			fingers,
+		} => {
+			kind = TabInputEventKind::TabInputGesturePinchBegin;
+			unsafe {
+				data.gesture_pinch_begin = TabInputGesturePinchBegin {
+					device: *device,
+					time_usec: *time_usec,
+					fingers: *fingers,
+				};
+			}
+		}
 
-        InputEventPayload::GesturePinchBegin {
-            device,
-            time_usec,
-            fingers,
-        } => {
-            kind = TabInputEventKind::TabInputGesturePinchBegin;
-            unsafe {
-                data.gesture_pinch_begin = TabInputGesturePinchBegin {
-                    device: *device,
-                    time_usec: *time_usec,
-                    fingers: *fingers,
-                };
-            }
-        }
+		InputEventPayload::GesturePinchUpdate {
+			device,
+			time_usec,
+			fingers,
+			dx,
+			dy,
+			scale,
+			rotation,
+		} => {
+			kind = TabInputEventKind::TabInputGesturePinchUpdate;
+			unsafe {
+				data.gesture_pinch_update = TabInputGesturePinchUpdate {
+					device: *device,
+					time_usec: *time_usec,
+					fingers: *fingers,
+					dx: *dx,
+					dy: *dy,
+					scale: *scale,
+					rotation: *rotation,
+				};
+			}
+		}
 
-        InputEventPayload::GesturePinchUpdate {
-            device,
-            time_usec,
-            fingers,
-            dx,
-            dy,
-            scale,
-            rotation,
-        } => {
-            kind = TabInputEventKind::TabInputGesturePinchUpdate;
-            unsafe {
-                data.gesture_pinch_update = TabInputGesturePinchUpdate {
-                    device: *device,
-                    time_usec: *time_usec,
-                    fingers: *fingers,
-                    dx: *dx,
-                    dy: *dy,
-                    scale: *scale,
-                    rotation: *rotation,
-                };
-            }
-        }
+		InputEventPayload::GesturePinchEnd {
+			device,
+			time_usec,
+			cancelled,
+		} => {
+			kind = TabInputEventKind::TabInputGesturePinchEnd;
+			unsafe {
+				data.gesture_pinch_end = TabInputGesturePinchEnd {
+					device: *device,
+					time_usec: *time_usec,
+					cancelled: *cancelled,
+				};
+			}
+		}
 
-        InputEventPayload::GesturePinchEnd {
-            device,
-            time_usec,
-            cancelled,
-        } => {
-            kind = TabInputEventKind::TabInputGesturePinchEnd;
-            unsafe {
-                data.gesture_pinch_end = TabInputGesturePinchEnd {
-                    device: *device,
-                    time_usec: *time_usec,
-                    cancelled: *cancelled,
-                };
-            }
-        }
+		InputEventPayload::GestureHoldBegin {
+			device,
+			time_usec,
+			fingers,
+		} => {
+			kind = TabInputEventKind::TabInputGestureHoldBegin;
+			unsafe {
+				data.gesture_hold_begin = TabInputGestureHoldBegin {
+					device: *device,
+					time_usec: *time_usec,
+					fingers: *fingers,
+				};
+			}
+		}
 
-        InputEventPayload::GestureHoldBegin {
-            device,
-            time_usec,
-            fingers,
-        } => {
-            kind = TabInputEventKind::TabInputGestureHoldBegin;
-            unsafe {
-                data.gesture_hold_begin = TabInputGestureHoldBegin {
-                    device: *device,
-                    time_usec: *time_usec,
-                    fingers: *fingers,
-                };
-            }
-        }
-
-        InputEventPayload::GestureHoldEnd {
-            device,
-            time_usec,
-            cancelled,
-        } => {
-            kind = TabInputEventKind::TabInputGestureHoldEnd;
-            unsafe {
-                data.gesture_hold_end = TabInputGestureHoldEnd {
-                    device: *device,
-                    time_usec: *time_usec,
-                    cancelled: *cancelled,
-                };
-            }
-        }
-
+		InputEventPayload::GestureHoldEnd {
+			device,
+			time_usec,
+			cancelled,
+		} => {
+			kind = TabInputEventKind::TabInputGestureHoldEnd;
+			unsafe {
+				data.gesture_hold_end = TabInputGestureHoldEnd {
+					device: *device,
+					time_usec: *time_usec,
+					cancelled: *cancelled,
+				};
+			}
+		}
 	};
 
 	TabInputEvent { kind, data }

@@ -348,59 +348,57 @@ pub enum InputEventPayload {
 		state: SwitchState,
 	},
 
+	// ======================
+	// Gestures (NEW)
+	// ======================
+	GestureSwipeBegin {
+		device: u32,
+		time_usec: u64,
+		fingers: u32,
+	},
+	GestureSwipeUpdate {
+		device: u32,
+		time_usec: u64,
+		fingers: u32,
+		dx: f64,
+		dy: f64,
+	},
+	GestureSwipeEnd {
+		device: u32,
+		time_usec: u64,
+		cancelled: bool,
+	},
 
-    // ======================
-    // Gestures (NEW)
-    // ======================
-    GestureSwipeBegin {
-        device: u32,
-        time_usec: u64,
-        fingers: u32,
-    },
-    GestureSwipeUpdate {
-        device: u32,
-        time_usec: u64,
-        fingers: u32,
-        dx: f64,
-        dy: f64,
-    },
-    GestureSwipeEnd {
-        device: u32,
-        time_usec: u64,
-        cancelled: bool,
-    },
+	GesturePinchBegin {
+		device: u32,
+		time_usec: u64,
+		fingers: u32,
+	},
+	GesturePinchUpdate {
+		device: u32,
+		time_usec: u64,
+		fingers: u32,
+		dx: f64,
+		dy: f64,
+		scale: f64,
+		rotation: f64,
+	},
+	GesturePinchEnd {
+		device: u32,
+		time_usec: u64,
+		cancelled: bool,
+	},
 
-    GesturePinchBegin {
-        device: u32,
-        time_usec: u64,
-        fingers: u32,
-    },
-    GesturePinchUpdate {
-        device: u32,
-        time_usec: u64,
-        fingers: u32,
-        dx: f64,
-        dy: f64,
-        scale: f64,
-        rotation: f64,
-    },
-    GesturePinchEnd {
-        device: u32,
-        time_usec: u64,
-        cancelled: bool,
-    },
-
-    GestureHoldBegin {
-        device: u32,
-        time_usec: u64,
-        fingers: u32,
-    },
-    GestureHoldEnd {
-        device: u32,
-        time_usec: u64,
-        cancelled: bool,
-    },
-
+	GestureHoldBegin {
+		device: u32,
+		time_usec: u64,
+		fingers: u32,
+	},
+	GestureHoldEnd {
+		device: u32,
+		time_usec: u64,
+		cancelled: bool,
+	},
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
