@@ -4,7 +4,7 @@
 //! - Parsing helpers into typed TabMessage variants
 
 use serde::{Deserialize, Serialize};
-use std::{os::fd::RawFd, str::FromStr, time::Duration};
+use std::{os::fd::{FromRawFd, OwnedFd, RawFd}, str::FromStr, time::Duration};
 
 pub mod message_frame;
 pub mod unix_socket_utils;
@@ -30,7 +30,7 @@ impl FromStr for BufferIndex {
 	}
 }
 /// Parsed, semantic Tab message.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug)]
 pub enum TabMessage {
 	Hello(HelloPayload),
 	Auth(AuthPayload),
@@ -38,7 +38,7 @@ pub enum TabMessage {
 	AuthError(AuthErrorPayload),
 	FramebufferLink {
 		payload: FramebufferLinkPayload,
-		dma_bufs: [RawFd; 2],
+		dma_bufs: [OwnedFd; 2],
 	},
 	SwapBuffers {
 		payload: SwapBuffersPayload,
@@ -64,6 +64,7 @@ impl TryFrom<TabMessageFrame> for TabMessage {
 		Self::parse_message_frame(value)
 	}
 }
+
 impl TabMessage {
 	/// Parse the raw TabMessageFrame into a typed `TabMessage` variant.
 	pub fn parse_message_frame(msg: TabMessageFrame) -> Result<Self, ProtocolError> {
@@ -89,7 +90,7 @@ impl TabMessage {
 			message_header::FRAMEBUFFER_LINK => {
 				let payload: FramebufferLinkPayload = msg.expect_payload_json()?;
 				msg.expect_n_fds(2)?;
-				let dma_bufs = [msg.fds[0], msg.fds[1]];
+				let dma_bufs = unsafe { [OwnedFd::from_raw_fd(msg.fds[0]), OwnedFd::from_raw_fd(msg.fds[1])] };
 				Ok(TabMessage::FramebufferLink { payload, dma_bufs })
 			}
 			message_header::SWAP_BUFFERS => {
@@ -545,7 +546,7 @@ pub struct SessionActivePayload {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ErrorPayload {
 	pub code: String,
-	pub message: Option<String>,
+	pub message: Option<String>
 }
 
 pub use message_header::MessageHeader;
