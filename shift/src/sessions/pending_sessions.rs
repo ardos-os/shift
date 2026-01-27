@@ -6,7 +6,7 @@ use crate::{auth::Token, sessions::Session};
 
 use super::{Role, SessionId};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PendingSession {
     id: SessionId,
     role: Role,
@@ -47,7 +47,10 @@ impl PendingSession {
             id: self.id,
             role: self.role,
             ready: false,
-            display_name: self.display_name.unwrap_or_else(|| format!("Session: {}", self.id.to_string()).into())
+            display_name: self.display_name.as_ref().map(Arc::clone).unwrap_or_else(|| self.default_session_name().into())
         }
+    }
+    pub fn default_session_name(&self) -> String {
+        format!("Session: {}", self.id.to_string())
     }
 }

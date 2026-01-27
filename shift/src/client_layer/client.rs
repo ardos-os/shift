@@ -1,22 +1,17 @@
 
-use std::{fmt::{Debug, Display}, sync::Arc};
+use std::{fmt::{Debug, Display}, os::unix::net::UnixStream, sync::Arc};
 
-use tab_protocol::{AuthErrorPayload, ErrorPayload, TabMessage, TabMessageFrame, message_header};
-use tokio::{io::unix::AsyncFd, net::UnixStream, task::JoinHandle};
+use tab_protocol::{AuthErrorPayload, AuthOkPayload, ErrorPayload, SessionCreatedPayload, SessionInfo, TabMessage, TabMessageFrame, message_header};
+use tokio::{io::unix::AsyncFd, task::JoinHandle};
 
-use crate::{auth::Token, client_layer::client_view::{self, ChannelsClientEnd, ClientView}, comms::{client2server::{C2SMsg, C2STx}, server2client::S2CMsg}, define_id_type, monitor::MonitorId, sessions::{Role, SessionId}};
+use crate::{auth::Token, client_layer::client_view::{self, ChannelsClientEnd, ClientView}, comms::{client2server::{C2SMsg, C2STx}, server2client::S2CMsg}, define_id_type, monitor::MonitorId, sessions::{Role, Session, SessionId}};
 pub type AsyncUnixStream = AsyncFd<UnixStream>;
-
-struct SessionInfo {
-    id: SessionId,
-    role: Role,
-}
 
 pub struct Client {
     id: ClientId,
     socket: AsyncUnixStream,
     channel_client_end: ChannelsClientEnd,
-    connected_session: Option<SessionInfo>,
+    connected_session: Option<Arc<Session>>,
     shutdown: bool
 }
 
@@ -39,6 +34,7 @@ impl Client {
     }
     #[tracing::instrument(level = "error", skip(self), fields(client.id = self.id().to_string()))]
     async fn send_error(&self, code: &str, error: Option<impl Display + Debug>) {
+        tracing::warn!("sending error to the client");
         let tab_message = TabMessageFrame::json(message_header::ERROR, ErrorPayload {
             code: code.into(),
             message: error.map(|e| e.to_string())
@@ -67,23 +63,24 @@ impl Client {
     }
     #[tracing::instrument(skip(self), fields(client.id = self.id().to_string()))]
     async fn handle_packet(&mut self, tab_message: TabMessage) {
+        
         macro_rules! check_admin {
             ($action:literal) => {
-                let Some(SessionInfo { role: Role::Admin, .. }) = self.connected_session.as_ref() else {
+                if !self.connected_session.as_deref().is_some_and(|session| session.role() == Role::Admin) {
                     self.send_error("forbidden", Some(format!("you need to authenticate as an admin client before being able to {}", $action))).await;
                     return;
                 };
             };
-        };
+        }
 
         macro_rules! check_session {
             ($action:literal, $var:ident) => {
-                let Some($var) = self.connected_session.as_ref() else {
+                let Some($var) = self.connected_session.as_deref() else {
                     self.send_error("forbidden", Some(format!("you need to authenticate before being able to {}", $action))).await;
                     return;
                 };
             };
-        };
+        }
         macro_rules! send_server_msg {
             ($send:expr) => {
                 let send_result = self.channel_client_end.to_server().send($send).await;
@@ -101,6 +98,7 @@ impl Client {
                     Ok(token) => token,
                     Err(error) => return self.send_auth_error(format!("token parse error: {error:?}")).await
                 };
+                tracing::info!(?token, "sending auth request to the server");
                 send_server_msg!(C2SMsg::Auth(token));
             }
             TabMessage::SessionSwitch(_session_switch_payload) => self.handle_unknown_msg("SessionSwitch").await,
@@ -118,14 +116,16 @@ impl Client {
                 send_server_msg!(C2SMsg::CreateSession(session_create_req));
             },
             TabMessage::Ping => {
+                tracing::trace!("received ping");
+
                 let send_result = TabMessageFrame::no_payload(message_header::PONG).send_frame_to_async_fd(&self.socket).await;
                 if let Err(e) = send_result {
                     tracing::warn!("failed to send pong message back: {e}");
-                    self.schedule_client_shutdown().await;
                     return;
                 }
             },
             TabMessage::FramebufferLink { payload: fb_info, dma_bufs } => {
+                tracing::trace!(?fb_info, ?dma_bufs, "received link framebuffer request");
                 check_session!("link framebuffer", _session);
                 send_server_msg!(C2SMsg::FramebufferLink { payload: fb_info, dma_bufs });
             },
@@ -155,14 +155,54 @@ impl Client {
         };
         match s2c_message {
             S2CMsg::AuthError(e) => {
+                tracing::info!(?e, "server says authentication didn't work, forwarding it to the client");
                 self.send_auth_error(e).await;
             }
-            S2CMsg::BindToSession { id, role } => {
-                self.connected_session = Some(SessionInfo {
-                    id,
-                    role
-                })
+            S2CMsg::BindToSession(session) => {
+                tracing::info!(?session, "server says authentication went well, forwarding auth ok to the client");
+                let auth_ok = TabMessageFrame::json(message_header::AUTH_OK, AuthOkPayload {
+                    monitors: vec![], // TODO: add monitors,
+                    session: SessionInfo {
+                        display_name: Some(session.display_name().to_string()),
+                        id: session.id().to_string(),
+                        role: session.role().into(),
+                        state: if session.ready() {
+                            tab_protocol::SessionLifecycle::Occupied
+                        } else {
+                            tab_protocol::SessionLifecycle::Loading
+                        }
+                    }
+                });
+                self.connected_session = Some(session);
+                let send_result = auth_ok.send_frame_to_async_fd(&self.socket).await;
+
+                if let Err(e) = send_result {
+                    tracing::warn!("failed to send auth ok message to client: {e}");
+                    return;
+                }
             },
+            S2CMsg::SessionCreated(token, session) => {
+                tracing::trace!(?session, ?token, "server says it created a new session sucessfully");
+                let send_result = TabMessageFrame::json(message_header::SESSION_CREATED, SessionCreatedPayload {
+                    session: SessionInfo {
+                        display_name: session.display_name().map(String::from),
+                        id: session.id().to_string(),
+                        role: session.role().into(),
+                        state: tab_protocol::SessionLifecycle::Pending
+                    },
+                    token: token.to_string()
+                }).send_frame_to_async_fd(&self.socket).await;
+                if let Err(e) = send_result {
+                    tracing::warn!("failed to send session created message to client: {e}");
+                    return;
+                }
+            },
+            S2CMsg::Error { code, error, shutdown } => {
+                self.send_error(&code, error.as_deref()).await;
+                if shutdown {
+                    self.schedule_client_shutdown().await;
+                }
+            }
         }
     }
     #[tracing::instrument(skip(self), fields(client.id = self.id().to_string()))]

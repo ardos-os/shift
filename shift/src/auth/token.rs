@@ -57,8 +57,12 @@ impl<const N: usize> Token<N> {
 
 impl<const N: usize> fmt::Debug for Token<N> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Never print the token in debug logs.
-        f.write_str("Token(REDACTED)")
+        let redact_token = !std::env::var("NO_REDACT").is_ok_and(|s| s == "y");
+        if redact_token {
+            f.write_str("Token(REDACTED)")
+        } else {
+            fmt::Display::fmt(self, f)
+        }
     }
 }
 

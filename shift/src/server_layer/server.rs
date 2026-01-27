@@ -1,4 +1,4 @@
-use std::{collections::HashMap, convert::Infallible, future::pending, io, os::fd::AsFd, path::Path};
+use std::{collections::HashMap, future::pending, io, path::Path, sync::Arc};
 
 use futures::future::select_all;
 use tab_protocol::TabMessageFrame;
@@ -18,7 +18,7 @@ pub struct ShiftServer {
     listener: Option<UnixListener>,
     current_session: Option<SessionId>,
     pending_sessions: HashMap<Token, PendingSession>,
-    active_sessions: HashMap<SessionId, Session>,
+    active_sessions: HashMap<SessionId, Arc<Session>>,
     connected_clients: HashMap<ClientId, ConnectedClient>
 }
 #[derive(Error, Debug)]
@@ -27,7 +27,9 @@ pub enum BindError {
     IOError(#[from] std::io::Error)
 }
 impl ShiftServer {
+    #[tracing::instrument(level= "info", skip(path), fields(path = ?path.as_ref().display()))]
     pub async fn bind(path: impl AsRef<Path>) -> Result<Self, BindError> {
+        std::fs::remove_file(&path).ok();
         let listener = UnixListener::bind(path)?;
         Ok(Self {
             listener: Some(listener),
@@ -37,6 +39,15 @@ impl ShiftServer {
             connected_clients: Default::default(),
         })
     }
+    #[tracing::instrument(level= "info", skip(self), fields(connected_clients=self.connected_clients.len(), active_sessions=self.active_sessions.len(), pending_sessions = self.pending_sessions.len(), current_session = ?self.current_session))]
+    pub fn add_initial_session(&mut self) -> Token {
+        let (token, session) = PendingSession::admin(Some("Admin".into()));
+        let id = session.id();
+        self.pending_sessions.insert(token.clone(), session);
+        tracing::info!(?token, %id, "added initial admin session");
+        token
+    }
+    #[tracing::instrument(level= "trace", skip(self), fields(connected_clients=self.connected_clients.len(), active_sessions=self.active_sessions.len(), pending_sessions = self.pending_sessions.len(), current_session = ?self.current_session))]
     pub async fn start(mut self) {
         let listener = self.listener.take().unwrap();
         loop {
@@ -53,6 +64,7 @@ impl ShiftServer {
             tracing::warn!("tried handling message from a non-existing client");
             return;
         };
+        let client_session = connected_client.client_view.authenticated_session().and_then(|s| self.active_sessions.get(&s)).map(Arc::clone);
         match message {
             C2SMsg::Shutdown => {
                 self.connected_clients.remove(&client_id);
@@ -62,19 +74,37 @@ impl ShiftServer {
                     connected_client.client_view.notify_auth_error(AuthError::NotFound).await;
                     return;
                 };
-                let session = pending_session.promote();
+                let session = Arc::new(pending_session.promote());
                 if !connected_client.client_view.notify_auth_success(&session).await {
+                    self.connected_clients.remove(&client_id);
+                    tracing::warn!("failed to notify auth success, removing client");
+                    return;
+                }
+                self.active_sessions.insert(session.id(), Arc::clone(&session));
+                if session.role() == Role::Admin && self.current_session.is_none() {
+                    self.current_session = Some(session.id());
+                }
+            },
+            C2SMsg::CreateSession(req) => {
+                let Some(client_session) = client_session else {
+                    connected_client.client_view.notify_error("forbidden".into(), None, false).await;
+                    return;
+                };
+                if client_session.role() != Role::Admin {
+                    connected_client.client_view.notify_error("forbidden".into(), None, false).await;
+                    return;
+                }
+                let (token, pending_session) = PendingSession::new(req.display_name.map(Arc::from), match req.role {
+                    tab_protocol::SessionRole::Admin => Role::Admin,
+                    tab_protocol::SessionRole::Session => Role::Normal,
+                });
+                self.pending_sessions.insert(token.clone(), pending_session.clone());
+                if !connected_client.client_view.notify_session_created(token, pending_session).await {
+                    tracing::warn!("failed to notify session created, removing client");
                     self.connected_clients.remove(&client_id);
                     return;
                 }
-                let session_role = session.role();
-                let session_id = session.id();
-                self.active_sessions.insert(session_id, session);
-                if session_role == Role::Admin && self.current_session.is_none() {
-                    self.current_session = Some(session_id);
-                }
             },
-            C2SMsg::CreateSession(req) => todo!(),
             C2SMsg::SwapBuffers { monitor_id, buffer } => todo!(),
             C2SMsg::FramebufferLink { payload, dma_bufs } => todo!()
         }
@@ -94,6 +124,7 @@ impl ShiftServer {
         }
         select_all(futures).await.0
     }
+    #[tracing::instrument(level= "info", skip(self, accept_result), fields(connected_clients=self.connected_clients.len(), active_sessions=self.active_sessions.len(), pending_sessions = self.pending_sessions.len(), current_session = ?self.current_session))]
     async fn handle_accept(&mut self, accept_result: io::Result<(UnixStream, SocketAddr)>) {
         match accept_result {
             Ok((client_socket, ip)) => {
@@ -111,7 +142,7 @@ impl ShiftServer {
 
                 let hellopkt = TabMessageFrame::hello("shift 0.1.0-alpha");
                 let client_async_fd = or_continue!(
-                    AsyncFd::new(client_socket),
+                    client_socket.into_std().and_then(AsyncFd::new),
                     "failed to accept connection: AsyncFd creation from client_socket failed: {}"
                 );
 
@@ -120,7 +151,9 @@ impl ShiftServer {
                     "failed to send hello packet: {}"
                 );
                 let (new_client, new_client_view) = Client::wrap_socket(client_async_fd);
+                let client_id = new_client_view.id();
                 self.connected_clients.insert(new_client_view.id(), ConnectedClient { client_view: new_client_view, join_handle: new_client.spawn().await });
+                tracing::info!(%client_id, "client successfully connected");
             }
             Err(e) => {
                 tracing::error!("failed to accept connection: {e}");

@@ -4,7 +4,7 @@ use crate::{define_id_type, sessions::Role};
 
 define_id_type!(Session, "se_");
 
-
+#[derive(Clone, Debug)]
 pub struct Session {
     pub(super) id: SessionId,
     pub(super) role: Role,

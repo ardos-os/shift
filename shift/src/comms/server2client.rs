@@ -1,12 +1,19 @@
-use crate::{auth, sessions::{self, SessionId}};
+use std::{borrow::Cow, sync::Arc};
+
+use tab_protocol::SessionRole;
+
+use crate::{auth::{self, Token}, sessions::{self, PendingSession, Session, SessionId}};
 
 #[derive(Debug)]
 pub enum S2CMsg {
-    BindToSession {
-        id: SessionId,
-        role: sessions::Role
-    },
-    AuthError(auth::error::Error)
+    BindToSession (Arc<Session>),
+    AuthError(auth::error::Error),
+    SessionCreated(Token, PendingSession),
+    Error {
+        code: Arc<str>,
+        error: Option<Arc<str>>,
+        shutdown: bool
+    }
 }
 
 

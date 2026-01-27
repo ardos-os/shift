@@ -1,4 +1,6 @@
-use crate::{auth, client_layer::client::{Client, ClientId}, comms::{client2server::{C2SMsg, C2SRx, C2STx, C2SWeakTx}, server2client::{S2CMsg, S2CRx, S2CTx}}, sessions::{Session, SessionId}};
+use std::{rc::Rc, sync::Arc};
+
+use crate::{auth::{self, Token}, client_layer::client::{Client, ClientId}, comms::{client2server::{C2SMsg, C2SRx, C2STx, C2SWeakTx}, server2client::{S2CMsg, S2CRx, S2CTx}}, sessions::{PendingSession, Session, SessionId}};
 
 
 #[derive(Debug)]
@@ -42,7 +44,8 @@ impl Channels {
 pub struct ClientView {
     id: ClientId,
     pub(super) channels: ChannelsServerEnd,
-    session_id: Option<SessionId>
+    session_id: Option<SessionId>,
+    
 }
 
 impl ClientView {
@@ -69,11 +72,19 @@ impl ClientView {
     pub async fn notify_auth_error(&self, reason: auth::error::Error) -> bool {
         self.channels.1.send(S2CMsg::AuthError(reason)).await.is_ok()
     }
-    pub async fn notify_auth_success(&mut self, session: &Session) -> bool {
+    pub async fn notify_auth_success(&mut self, session: &Arc<Session>) -> bool {
         self.session_id = Some(session.id());
-        self.channels.1.send(S2CMsg::BindToSession{
-            id: session.id(),
-            role: session.role()
-        }).await.is_ok()
+        self.channels.1.send(S2CMsg::BindToSession(Arc::clone(&session))).await.is_ok()
+    }
+    pub async fn notify_session_created(&mut self, token: Token, session: PendingSession) -> bool {
+        self.channels.1.send(S2CMsg::SessionCreated(token, session)).await.is_ok()
+    }
+
+    pub async fn notify_error(&mut self, code: Arc<str>, error: Option<Arc<str>>, shutdown: bool) -> bool {
+        self.channels.1.send(S2CMsg::Error { code, error, shutdown }).await.is_ok()
+    }
+
+    pub fn authenticated_session(&self) -> Option<SessionId> {
+        self.session_id
     }
 }
