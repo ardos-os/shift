@@ -6,26 +6,26 @@ define_id_type!(Session, "se_");
 
 #[derive(Clone, Debug)]
 pub struct Session {
-    pub(super) id: SessionId,
-    pub(super) role: Role,
-    pub(super) ready: bool,
-    pub(super) display_name: Arc<str>
+	pub(super) id: SessionId,
+	pub(super) role: Role,
+	pub(super) ready: bool,
+	pub(super) display_name: Arc<str>,
 }
 
 impl Session {
-    pub fn mark_as_ready(&mut self)  {
-        self.ready = true;
-    }
-    pub fn id(&self) -> SessionId {
-        self.id
-    }
-    pub fn role(&self) -> Role {
-        self.role
-    }
-    pub fn ready(&self) -> bool {
-        self.ready
-    }
-    pub fn display_name(&self) -> &str {
-        &self.display_name
-    }
+	pub fn mark_as_ready(&mut self) {
+		self.ready = true;
+	}
+	pub fn id(&self) -> SessionId {
+		self.id
+	}
+	pub fn role(&self) -> Role {
+		self.role
+	}
+	pub fn ready(&self) -> bool {
+		self.ready
+	}
+	pub fn display_name(&self) -> &str {
+		&self.display_name
+	}
 }

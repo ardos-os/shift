@@ -18,5 +18,5 @@ serde_json = "1.0"
 thiserror = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-easydrm = {git = "https://github.com/everything-os/easydrm", branch="async-poll-events"}
+easydrm = {git = "https://github.com/everything-os/easydrm", branch="main"}
 tokio = {version="1.49.0", features=["macros", "net", "rt-multi-thread", "time", "sync"]}

@@ -1,9 +1,9 @@
-use std::io::{ErrorKind, IoSlice, IoSliceMut};
-use std::os::fd::{AsRawFd, RawFd};
-use std::os::unix::net::UnixStream;
 use nix::errno::Errno;
 use nix::sys::socket::{ControlMessage, ControlMessageOwned, MsgFlags, recvmsg, sendmsg};
 use serde::Serialize;
+use std::io::{ErrorKind, IoSlice, IoSliceMut};
+use std::os::fd::{AsRawFd, RawFd};
+use std::os::unix::net::UnixStream;
 
 use crate::{HelloPayload, MessageHeader, PROTOCOL_VERSION, ProtocolError};
 
@@ -18,14 +18,15 @@ fn would_block_err() -> std::io::Error {
 	std::io::Error::new(ErrorKind::WouldBlock, ProtocolError::WouldBlock)
 }
 impl TabMessageFrame {
-
 	/// Write a framed TabMessageFrame to the provided stream using sendmsg/SCM_RIGHTS.
 	pub fn encode_and_send(&self, stream: &impl AsRawFd) -> Result<(), ProtocolError> {
 		let encoded = self.serialize();
-		let iov = [
-			IoSlice::new(encoded.as_bytes())
-		];
-		let cmsg = if self.fds.is_empty() {vec![]} else {vec![ControlMessage::ScmRights(&self.fds)]};
+		let iov = [IoSlice::new(encoded.as_bytes())];
+		let cmsg = if self.fds.is_empty() {
+			vec![]
+		} else {
+			vec![ControlMessage::ScmRights(&self.fds)]
+		};
 		sendmsg::<()>(stream.as_raw_fd(), &iov, &cmsg, MsgFlags::empty(), None)?;
 		Ok(())
 	}
@@ -39,43 +40,43 @@ impl TabMessageFrame {
 
 		format!("{header_line}\n{payload_line}\n")
 	}
-	
+
 	/// Non-blocking version of [`read_framed`]
 	#[cfg(feature = "async")]
-    pub async fn read_frame_from_async_fd<T: AsRawFd>(
-        fd: &tokio::io::unix::AsyncFd<T>,
-    ) -> Result<Self, ProtocolError> {
+	pub async fn read_frame_from_async_fd<T: AsRawFd>(
+		fd: &tokio::io::unix::AsyncFd<T>,
+	) -> Result<Self, ProtocolError> {
 		loop {
 			let mut guard = fd.readable().await?;
 			if let Ok(result) = guard.try_io(|_| match Self::read_framed(fd.get_ref()) {
 				Err(ProtocolError::WouldBlock) => Err(would_block_err()),
-				def => Ok(def)
+				def => Ok(def),
 			}) {
-				break result?
+				break result?;
 			} else {
-				continue
+				continue;
 			}
 		}
 	}
 	/// Sends a message asynchronously
 	#[cfg(feature = "async")]
-    pub async fn send_frame_to_async_fd<T: AsRawFd>(
+	pub async fn send_frame_to_async_fd<T: AsRawFd>(
 		&self,
-        fd: &tokio::io::unix::AsyncFd<T>,
-    ) -> Result<(), ProtocolError> {
+		fd: &tokio::io::unix::AsyncFd<T>,
+	) -> Result<(), ProtocolError> {
 		let packet = loop {
 			let mut guard = fd.writable().await?;
 			if let Ok(result) = guard.try_io(|_| match self.encode_and_send(fd) {
 				Err(ProtocolError::WouldBlock) => Err(would_block_err()),
-				def => Ok(def)
+				def => Ok(def),
 			}) {
-				break result?
+				break result?;
 			} else {
-				continue
+				continue;
 			}
 		}?;
-		return Ok(packet)
-    }
+		return Ok(packet);
+	}
 	/// Read one Tab message frame using recvmsg/SCM_RIGHTS.
 	pub fn read_framed(stream: &impl AsRawFd) -> Result<Self, ProtocolError> {
 		// Enough for two short lines.
@@ -219,4 +220,3 @@ impl TabMessageFrame {
 		})
 	}
 }
-

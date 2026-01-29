@@ -1,4 +1,4 @@
 mod server;
 
-pub use server::ShiftServer;
 pub use server::BindError;
+pub use server::ShiftServer;
