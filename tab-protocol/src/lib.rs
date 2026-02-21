@@ -49,7 +49,10 @@ pub enum TabMessage {
 		acquire_fence: Option<OwnedFd>,
 	},
 	BufferRequestAck(BufferRequestAckPayload),
-	BufferRelease(BufferReleasePayload),
+	BufferRelease {
+		payload: BufferReleasePayload,
+		release_fence: Option<OwnedFd>,
+	},
 	InputEvent(InputEventPayload),
 	MonitorAdded(MonitorAddedPayload),
 	MonitorRemoved(MonitorRemovedPayload),
@@ -162,10 +165,23 @@ impl TabMessage {
 					return Err(err);
 				};
 				let buffer_index = buffer_index_str.parse().map_err(|_| err)?;
-				Ok(TabMessage::BufferRelease(BufferReleasePayload {
-					monitor_id: monitor_id.into(),
-					buffer: buffer_index,
-				}))
+				let release_fence = match msg.fds.len() {
+					0 => None,
+					1 => Some(unsafe { OwnedFd::from_raw_fd(msg.fds[0]) }),
+					found => {
+						return Err(ProtocolError::ExpectedFds {
+							expected: 1,
+							found: found as u32,
+						});
+					}
+				};
+				Ok(TabMessage::BufferRelease {
+					payload: BufferReleasePayload {
+						monitor_id: monitor_id.into(),
+						buffer: buffer_index,
+					},
+					release_fence,
+				})
 			}
 			message_header::INPUT_EVENT => {
 				let payload: InputEventPayload = msg.expect_payload_json()?;

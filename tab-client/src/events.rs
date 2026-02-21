@@ -1,4 +1,5 @@
 use crate::MonitorState;
+use std::os::fd::RawFd;
 use tab_protocol::BufferIndex;
 
 /// Monitor lifecycle event emitted to listeners.
@@ -14,5 +15,6 @@ pub enum RenderEvent {
 	BufferReleased {
 		monitor_id: String,
 		buffer: BufferIndex,
+		release_fence_fd: Option<RawFd>,
 	},
 }

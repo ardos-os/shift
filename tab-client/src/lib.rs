@@ -16,7 +16,7 @@ pub use swapchain::{TabBuffer, TabSwapchain};
 
 use std::collections::HashMap;
 use std::os::{
-	fd::{AsRawFd, RawFd},
+	fd::{AsRawFd, AsFd, IntoRawFd, OwnedFd, RawFd},
 	unix::net::UnixStream,
 };
 use std::sync::Arc;
@@ -204,8 +204,11 @@ impl TabClient {
 			TabMessage::MonitorRemoved(payload) => {
 				self.handle_monitor_removed(payload.monitor_id);
 			}
-			TabMessage::BufferRelease(payload) => {
-				self.handle_buffer_release(payload);
+			TabMessage::BufferRelease {
+				payload,
+				release_fence,
+			} => {
+				self.handle_buffer_release(payload, release_fence);
 			}
 			_ => {}
 		}
@@ -229,12 +232,23 @@ impl TabClient {
 		}
 	}
 
-	fn handle_buffer_release(&mut self, payload: BufferReleasePayload) {
-		let event = RenderEvent::BufferReleased {
-			monitor_id: payload.monitor_id,
-			buffer: payload.buffer,
-		};
+	fn handle_buffer_release(
+		&mut self,
+		payload: BufferReleasePayload,
+		release_fence: Option<OwnedFd>,
+	) {
+		let monitor_id = payload.monitor_id;
+		let buffer = payload.buffer;
 		for listener in &self.render_listeners {
+			let release_fence_fd = release_fence
+				.as_ref()
+				.and_then(|fd| fd.as_fd().try_clone_to_owned().ok())
+				.map(|fd| fd.into_raw_fd());
+			let event = RenderEvent::BufferReleased {
+				monitor_id: monitor_id.clone(),
+				buffer,
+				release_fence_fd,
+			};
 			listener(&event);
 		}
 	}

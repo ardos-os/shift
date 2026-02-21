@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::os::fd::OwnedFd;
 
 use tab_protocol::BufferIndex;
 
@@ -8,10 +9,11 @@ use crate::{
 	sessions::{PendingSession, Session},
 };
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 pub struct BufferRelease {
 	pub monitor_id: MonitorId,
 	pub buffer: BufferIndex,
+	pub release_fence: Option<OwnedFd>,
 }
 
 #[derive(Debug)]

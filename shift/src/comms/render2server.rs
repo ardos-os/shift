@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::os::fd::OwnedFd;
 
 use tab_protocol::BufferIndex;
 
@@ -25,6 +26,13 @@ pub enum RenderEvt {
 		session_id: SessionId,
 		monitor_id: MonitorId,
 		buffer: BufferIndex,
+	},
+	/// Renderer switched to a newer buffer and no longer needs the previous one.
+	BufferConsumed {
+		session_id: SessionId,
+		monitor_id: MonitorId,
+		buffer: BufferIndex,
+		release_fence: Option<OwnedFd>,
 	},
 	/// Renderer rejected a buffer request after inspecting local state.
 	BufferRequestRejected {

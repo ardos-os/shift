@@ -246,7 +246,7 @@ dependencies = [
 [[package]]
 name = "easydrm"
 version = "0.3.0"
-source = "git+https://github.com/everything-os/easydrm?branch=main#e983479dc730606514ca49eae9db0b5c2993d630"
+source = "git+https://github.com/everything-os/easydrm?branch=main#3b4a2e3f1feea3f27b13311961b90199dea3f007"
 dependencies = [
  "drm",
  "drm-sys",

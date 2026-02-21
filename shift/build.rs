@@ -19,6 +19,7 @@ fn main() {
 			"EGL_EXT_image_dma_buf_import_modifiers",
 			"EGL_MESA_image_dma_buf_export",
 			"EGL_KHR_surfaceless_context",
+			"EGL_ANDROID_native_fence_sync",
 		],
 	)
 	.write_bindings(gl_generator::StructGenerator, &mut egl_file)

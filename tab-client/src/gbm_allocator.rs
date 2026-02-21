@@ -27,7 +27,8 @@ const DEFAULT_RENDER_NODES: &[&str] = &[
 pub struct GbmAllocator {
 	device: Device<std::fs::File>,
 	format: Format,
-	usage: BufferObjectFlags,
+	preferred_usage: BufferObjectFlags,
+	fallback_usage: BufferObjectFlags,
 }
 
 impl GbmAllocator {
@@ -40,9 +41,8 @@ impl GbmAllocator {
 						return Ok(Self {
 							device,
 							format: Format::Xrgb8888,
-							usage: BufferObjectFlags::SCANOUT
-								| BufferObjectFlags::RENDERING
-								| BufferObjectFlags::LINEAR,
+							preferred_usage: BufferObjectFlags::RENDERING,
+							fallback_usage: BufferObjectFlags::RENDERING,
 						});
 					}
 					Err(err) => {
@@ -73,10 +73,20 @@ impl GbmAllocator {
 			u32::try_from(monitor.info.height).map_err(|_| TabClientError::InvalidMonitorDimensions)?;
 		let bo0 = self
 			.device
-			.create_buffer_object::<()>(width, height, self.format, self.usage)?;
+			.create_buffer_object::<()>(width, height, self.format, self.preferred_usage)
+			.or_else(|_| {
+				self
+					.device
+					.create_buffer_object::<()>(width, height, self.format, self.fallback_usage)
+			})?;
 		let bo1 = self
 			.device
-			.create_buffer_object::<()>(width, height, self.format, self.usage)?;
+			.create_buffer_object::<()>(width, height, self.format, self.preferred_usage)
+			.or_else(|_| {
+				self
+					.device
+					.create_buffer_object::<()>(width, height, self.format, self.fallback_usage)
+			})?;
 		let buffers = [
 			TabBuffer::new(BufferIndex::Zero, bo0),
 			TabBuffer::new(BufferIndex::One, bo1),

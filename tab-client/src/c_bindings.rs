@@ -40,6 +40,7 @@ pub struct TabFrameTarget {
 pub struct TabBufferRelease {
 	pub monitor_id: *mut c_char,
 	pub buffer_index: u32,
+	pub release_fence_fd: c_int,
 }
 
 #[repr(C)]
@@ -433,7 +434,7 @@ struct MonitorEntry {
 }
 
 enum PendingEvent {
-	BufferReleased(String, BufferIndex),
+	BufferReleased(String, BufferIndex, Option<c_int>),
 	MonitorAdded(MonitorState),
 	MonitorRemoved(String),
 }
@@ -465,9 +466,15 @@ impl TabClientHandle {
 			client.on_render_event(move |evt| {
 				let mut guard = q.lock().unwrap();
 				match evt {
-					RenderEvent::BufferReleased { monitor_id, buffer } => {
-						guard.push_back(PendingEvent::BufferReleased(monitor_id.clone(), *buffer))
-					}
+					RenderEvent::BufferReleased {
+						monitor_id,
+						buffer,
+						release_fence_fd,
+					} => guard.push_back(PendingEvent::BufferReleased(
+						monitor_id.clone(),
+						*buffer,
+						*release_fence_fd,
+					)),
 				}
 			});
 		}
@@ -764,7 +771,7 @@ pub unsafe extern "C" fn tab_client_next_event(
 			return false;
 		};
 		match evt {
-			PendingEvent::BufferReleased(monitor_id, buffer) => {
+			PendingEvent::BufferReleased(monitor_id, buffer, release_fence_fd) => {
 				if let Some(entry) = handle.monitors.get_mut(&monitor_id) {
 					entry.swapchain.mark_released(buffer);
 				}
@@ -772,6 +779,7 @@ pub unsafe extern "C" fn tab_client_next_event(
 				(*event).data.buffer_released = TabBufferRelease {
 					monitor_id: dup_string(&monitor_id),
 					buffer_index: buffer as u32,
+					release_fence_fd: release_fence_fd.unwrap_or(-1),
 				};
 				true
 			}
@@ -808,6 +816,10 @@ pub unsafe extern "C" fn tab_client_free_event_strings(event: *mut TabEvent) {
 				if !(*event).data.buffer_released.monitor_id.is_null() {
 					drop(CString::from_raw((*event).data.buffer_released.monitor_id));
 					(*event).data.buffer_released.monitor_id = ptr::null_mut();
+				}
+				if (*event).data.buffer_released.release_fence_fd >= 0 {
+					libc::close((*event).data.buffer_released.release_fence_fd);
+					(*event).data.buffer_released.release_fence_fd = -1;
 				}
 			}
 			TabEventType::TAB_EVENT_MONITOR_REMOVED => {

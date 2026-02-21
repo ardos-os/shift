@@ -6,14 +6,14 @@ mod egl;
 
 use easydrm::{gl::{self, COLOR_BUFFER_BIT, DEPTH_BUFFER_BIT}, EasyDRM, Monitor, MonitorContextCreationRequest};
 use skia_safe::{
-	self as skia, AlphaType, FilterMode, MipmapMode, Paint, SamplingOptions, gpu,
+	self as skia, FilterMode, MipmapMode, Paint, SamplingOptions, gpu,
 	gpu::gl::FramebufferInfo,
 };
 use std::{
 	collections::HashMap,
 	hash::Hash,
 	io::ErrorKind,
-	os::fd::{AsRawFd, OwnedFd},
+	os::fd::{AsRawFd, FromRawFd, OwnedFd},
 	sync::Arc,
 };
 use tab_protocol::BufferIndex;
@@ -100,7 +100,7 @@ impl MonitorRenderState {
 	}
 
 	pub fn flush(&mut self) {
-		self.gr.flush_and_submit();
+		self.gr.flush(None);
 	}
 
 	pub fn get_server_layer_monitor(monitor: &Monitor<Self>) -> ServerLayerMonitor {
@@ -114,28 +114,17 @@ impl MonitorRenderState {
 	}
 
 	#[tracing::instrument(skip_all, fields(monitor_id = %self.id))]
-	fn draw_texture(&mut self, texture: &SkiaDmaBufTexture) -> Result<(), RenderError> {
-		let Some(image) = skia::Image::from_texture(
-			&mut self.gr,
-			&texture.backend_texture,
-			gpu::SurfaceOrigin::TopLeft,
-			skia::ColorType::RGBA8888,
-			AlphaType::Opaque,
-			None,
-		) else {
+	fn draw_texture(&mut self, texture: &mut SkiaDmaBufTexture) -> Result<(), RenderError> {
+		let Some(image) = texture.image(&mut self.gr) else {
 			return Err(RenderError::SkiaSurface);
 		};
 		let rect = skia::Rect::from_wh(self.width as f32, self.height as f32);
 		let sampling = SamplingOptions::new(FilterMode::Nearest, MipmapMode::Nearest);
 		let mut paint = Paint::default();
-		paint.set_alpha_f(1.0);
-		paint.set_argb(255, 255, 0,0);
-		self.canvas().draw_rect(rect, &paint);
 		paint.set_argb(255, 255, 255, 255);
 		self
 			.canvas()
 			.draw_image_rect_with_sampling_options(image, None, rect, sampling, &paint);
-
 		Ok(())
 	}
 
@@ -174,6 +163,20 @@ enum BufferSlot {
 enum FenceEvent {
 	Signaled { key: SlotKey },
 	Failed { key: SlotKey, reason: Arc<str> },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct DeferredRelease {
+	monitor_id: MonitorId,
+	session_id: SessionId,
+	buffer: BufferSlot,
+	target_flip: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SlotOwner {
+	Client,
+	Shift,
 }
 
 impl BufferSlot {
@@ -215,9 +218,12 @@ pub struct RenderingLayer {
 	known_monitors: HashMap<MonitorId, ServerLayerMonitor>,
 	monitor_state: HashMap<(MonitorId, SessionId), MonitorSurfaceState>,
 	slots: HashMap<SlotKey, SkiaDmaBufTexture>,
+	slot_ownership: HashMap<SlotKey, SlotOwner>,
 	fence_event_tx: mpsc::UnboundedSender<FenceEvent>,
 	fence_event_rx: mpsc::UnboundedReceiver<FenceEvent>,
 	fence_waiters: HashMap<SlotKey, JoinHandle<()>>,
+	flip_counters: HashMap<MonitorId, u64>,
+	deferred_releases: Vec<DeferredRelease>,
 	current_session: Option<SessionId>,
 }
 
@@ -238,9 +244,12 @@ impl RenderingLayer {
 			known_monitors: HashMap::new(),
 			monitor_state: HashMap::new(),
 			slots: HashMap::new(),
+			slot_ownership: HashMap::new(),
 			fence_event_tx,
 			fence_event_rx,
 			fence_waiters: HashMap::new(),
+			flip_counters: HashMap::new(),
+			deferred_releases: Vec::new(),
 			current_session: None,
 		})
 	}
@@ -270,6 +279,7 @@ impl RenderingLayer {
 			}
 			for mon in self.drm.monitors_mut() {
 				if mon.can_render() && mon.make_current().is_ok() {
+					unsafe { mon.gl().ClearColor(1.0, 0.0, 0.0, 1.0); }
 					unsafe{mon.gl().Clear(COLOR_BUFFER_BIT | DEPTH_BUFFER_BIT); };
 
 					let monitor_id = mon.context().id;
@@ -278,7 +288,7 @@ impl RenderingLayer {
 					let context = mon.context_mut();
 					context.ensure_surface_size(w, h)?;
 
-					let texture = current_session
+					let key = current_session
 						.and_then(|session_id| {
 							let state = self
 								.monitor_state
@@ -287,10 +297,14 @@ impl RenderingLayer {
 							state
 								.current_buffer
 								.map(|buffer| SlotKey::new(monitor_id, session_id, buffer))
-						})
-						.and_then(|key| self.slots.get_mut(&key));
+						});
+					let texture = key.and_then(|key| {
+						if self.slot_ownership.get(&key).copied() != Some(SlotOwner::Shift) {
+							return None;
+						}
+						self.slots.get_mut(&key)
+					});
 					if let Some(texture) = texture {
-						unsafe{context.gl.ClearColor(1.0, 0.0, 0.0, 1.0)};
 						if let Err(e) = context.draw_texture(texture) {
 							warn!(%monitor_id, "failed to draw client texture: {e:?}");
 						}
@@ -310,6 +324,9 @@ impl RenderingLayer {
 					.map(|m| m.context().id)
 					.collect::<Vec<_>>();
 				self.drm.swap_buffers()?;
+				self
+					.process_deferred_releases(&page_flipped_monitors)
+					.await;
 
 				self
 					.emit_event(RenderEvt::PageFlip {
@@ -336,7 +353,7 @@ impl RenderingLayer {
 					}
 					fence_evt = self.fence_event_rx.recv() => {
 						if let Some(fence_evt) = fence_evt {
-							self.handle_fence_event(fence_evt);
+							self.handle_fence_event(fence_evt).await;
 						}
 					}
 				}
@@ -403,6 +420,11 @@ impl RenderingLayer {
 
 	fn cleanup_monitor_slots(&mut self, monitor_id: MonitorId) {
 		self.slots.retain(|key, _| key.monitor_id != monitor_id);
+		self.slot_ownership.retain(|key, _| key.monitor_id != monitor_id);
+		self.flip_counters.remove(&monitor_id);
+		self
+			.deferred_releases
+			.retain(|item| item.monitor_id != monitor_id);
 		let remove = self
 			.fence_waiters
 			.keys()
@@ -418,7 +440,11 @@ impl RenderingLayer {
 
 	fn cleanup_session_slots(&mut self, session_id: SessionId) {
 		self.slots.retain(|key, _| key.session_id != session_id);
+		self.slot_ownership.retain(|key, _| key.session_id != session_id);
 		self.monitor_state.retain(|(_, sess), _| *sess != session_id);
+		self
+			.deferred_releases
+			.retain(|item| item.session_id != session_id);
 		let remove = self
 			.fence_waiters
 			.keys()
@@ -492,7 +518,104 @@ impl RenderingLayer {
 		for (slot, texture) in imported {
 			let key = SlotKey::new(monitor_id, session_id, slot);
 			self.slots.insert(key, texture);
+			self.slot_ownership.insert(key, SlotOwner::Client);
 		}
+	}
+
+	fn queue_buffer_release(
+		&mut self,
+		monitor_id: MonitorId,
+		session_id: SessionId,
+		buffer: BufferSlot,
+	) {
+		let target_flip = self
+			.flip_counters
+			.get(&monitor_id)
+			.copied()
+			.unwrap_or(0)
+			.saturating_add(1);
+		if self.deferred_releases.iter().any(|item| {
+			item.monitor_id == monitor_id
+				&& item.session_id == session_id
+				&& item.buffer == buffer
+		}) {
+			return;
+		}
+		self.deferred_releases.push(DeferredRelease {
+			monitor_id,
+			session_id,
+			buffer,
+			target_flip,
+		});
+	}
+
+	async fn process_deferred_releases(&mut self, flipped_monitors: &[MonitorId]) {
+		for monitor_id in flipped_monitors {
+			let next = self
+				.flip_counters
+				.get(monitor_id)
+				.copied()
+				.unwrap_or(0)
+				.saturating_add(1);
+			self.flip_counters.insert(*monitor_id, next);
+		}
+		let mut ready = Vec::new();
+		self.deferred_releases.retain(|item| {
+			let flips = self
+				.flip_counters
+				.get(&item.monitor_id)
+				.copied()
+				.unwrap_or(0);
+			if flips >= item.target_flip {
+				ready.push(*item);
+				false
+			} else {
+				true
+			}
+		});
+		for item in ready {
+			let key = SlotKey::new(item.monitor_id, item.session_id, item.buffer);
+			self.slot_ownership.insert(key, SlotOwner::Client);
+			let release_fence = self.create_release_fence_for_monitor(item.monitor_id);
+			self
+				.emit_event(RenderEvt::BufferConsumed {
+					session_id: item.session_id,
+					monitor_id: item.monitor_id,
+					buffer: item.buffer.into(),
+					release_fence,
+				})
+				.await;
+		}
+	}
+
+	fn create_release_fence_for_monitor(&mut self, monitor_id: MonitorId) -> Option<OwnedFd> {
+		let mon = self
+			.drm
+			.monitors_mut()
+			.find(|m| m.context().id == monitor_id)?;
+		if let Err(e) = mon.make_current() {
+			warn!(%monitor_id, "failed to make monitor current for release fence: {e:?}");
+			return None;
+		}
+		let (fence_fd, sync) = match mon.create_egl_fence() {
+			Ok(v) => v,
+			Err(e) => {
+				warn!(%monitor_id, "failed to create egl release fence: {e}");
+				return None;
+			}
+		};
+		if !sync.is_null() {
+			let egl = egl::Egl::load_with(|s| mon.get_proc_address(s));
+			if egl.DestroySync.is_loaded() {
+				unsafe {
+					egl.DestroySync(egl.GetCurrentDisplay(), sync.cast());
+				}
+			}
+		}
+		if fence_fd < 0 {
+			return None;
+		}
+		Some(unsafe { OwnedFd::from_raw_fd(fence_fd) })
 	}
 }
 
@@ -558,10 +681,15 @@ impl RenderingLayer {
 						.monitor_state
 						.entry((monitor_id, session_id))
 						.or_default();
+					let previous = state.current_buffer;
 					state.pending_buffer = Some(slot);
+					self.slot_ownership.insert(slot_key, SlotOwner::Shift);
 					if !has_acquire_fence {
 						state.current_buffer = Some(slot);
 						state.pending_buffer = None;
+						if let Some(previous) = previous.filter(|prev| *prev != slot) {
+							self.queue_buffer_release(monitor_id, session_id, previous);
+						}
 					}
 					self
 						.emit_event(RenderEvt::BufferRequestAck {
@@ -650,14 +778,18 @@ impl RenderingLayer {
 		self.fence_waiters.insert(key, handle);
 	}
 
-	fn handle_fence_event(&mut self, event: FenceEvent) {
+	async fn handle_fence_event(&mut self, event: FenceEvent) {
 		match event {
 			FenceEvent::Signaled { key } => {
 				self.fence_waiters.remove(&key);
 				if let Some(state) = self.monitor_state.get_mut(&(key.monitor_id, key.session_id)) {
 					if state.pending_buffer == Some(key.buffer) {
+						let previous = state.current_buffer;
 						state.current_buffer = Some(key.buffer);
 						state.pending_buffer = None;
+						if let Some(previous) = previous.filter(|prev| *prev != key.buffer) {
+							self.queue_buffer_release(key.monitor_id, key.session_id, previous);
+						}
 					}
 				}
 			}
@@ -666,8 +798,12 @@ impl RenderingLayer {
 				warn!(%key.monitor_id, %key.session_id, buffer = ?key.buffer, %reason, "fence waiter failed, promoting pending buffer");
 				if let Some(state) = self.monitor_state.get_mut(&(key.monitor_id, key.session_id)) {
 					if state.pending_buffer == Some(key.buffer) {
+						let previous = state.current_buffer;
 						state.current_buffer = Some(key.buffer);
 						state.pending_buffer = None;
+						if let Some(previous) = previous.filter(|prev| *prev != key.buffer) {
+							self.queue_buffer_release(key.monitor_id, key.session_id, previous);
+						}
 					}
 				}
 			}

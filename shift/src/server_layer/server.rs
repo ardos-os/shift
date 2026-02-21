@@ -257,8 +257,7 @@ impl ShiftServer {
 				buffer,
 				acquire_fence,
 			} => {
-
-				let Some(connected_client) = self.connected_clients.get_mut(&client_id) else {
+				let Some(connected_client) = self.connected_clients.get(&client_id) else {
 					tracing::warn!("tried handling message from a non-existing client");
 					return;
 				};
@@ -268,10 +267,12 @@ impl ShiftServer {
 					.and_then(|s| self.active_sessions.get(&s))
 					.map(Arc::clone);
 				let Some(client_session) = client_session else {
-					connected_client
-						.client_view
-						.notify_error("forbidden".into(), None, false)
-						.await;
+					if let Some(client) = self.connected_clients.get_mut(&client_id) {
+						client
+							.client_view
+							.notify_error("forbidden".into(), None, false)
+							.await;
+					}
 					return;
 				};
 				let owner_key = (client_session.id(), monitor_id, buffer);
@@ -281,29 +282,31 @@ impl ShiftServer {
 					.copied()
 					.unwrap_or(BufferOwner::Client);
 				if current_owner != BufferOwner::Client {
-					connected_client
-						.client_view
-						.notify_error(
-							"ownership_violation".into(),
-							Some("requested buffer is not client-owned".into()),
-							false,
-						)
-						.await;
+					if let Some(client) = self.connected_clients.get_mut(&client_id) {
+						client
+							.client_view
+							.notify_error(
+								"ownership_violation".into(),
+								Some("requested buffer is not client-owned".into()),
+								false,
+							)
+							.await;
+					}
 					return;
 				}
 				if self.pending_buffer_requests.iter().any(|pending| {
-					pending.session_id == client_session.id()
-						&& pending.monitor_id == monitor_id
-						&& pending.buffer == buffer
+					pending.session_id == client_session.id() && pending.monitor_id == monitor_id
 				}) {
-					connected_client
-						.client_view
-						.notify_error(
-							"buffer_request_inflight".into(),
-							Some("buffer request already pending".into()),
-							false,
-						)
-						.await;
+					if let Some(client) = self.connected_clients.get_mut(&client_id) {
+						client
+							.client_view
+							.notify_error(
+								"buffer_request_inflight".into(),
+								Some("monitor already has an in-flight buffer request".into()),
+								false,
+							)
+							.await;
+					}
 					return;
 				}
 				if let Err(e) = self
@@ -423,11 +426,6 @@ impl ShiftServer {
 				self
 					.buffer_ownership
 					.insert((session_id, monitor_id, buffer), BufferOwner::Shift);
-				self.waiting_flip.push(PendingFlip {
-					session_id,
-					monitor_id,
-					buffer,
-				});
 				self.swap_buffers_received = self.swap_buffers_received.saturating_add(1);
 
 				let mut should_disconnect = false;
@@ -470,60 +468,42 @@ impl ShiftServer {
 						.await;
 				}
 			}
+			RenderEvt::BufferConsumed {
+				session_id,
+				monitor_id,
+				buffer,
+				release_fence,
+			} => {
+				self
+					.buffer_ownership
+					.insert((session_id, monitor_id, buffer), BufferOwner::Client);
+				let Some((_id, client)) = self
+					.connected_clients
+					.iter_mut()
+					.find(|(_, c)| c.client_view.authenticated_session() == Some(session_id))
+				else {
+					return;
+				};
+				if !client
+					.client_view
+					.notify_buffer_release(vec![BufferRelease {
+						monitor_id,
+						buffer,
+						release_fence,
+					}])
+					.await
+				{
+					tracing::warn!(%session_id, %monitor_id, buffer = buffer as u8, "failed to send early buffer_release");
+				} else {
+					self.frame_done_emitted = self.frame_done_emitted.saturating_add(1);
+				}
+			}
 			RenderEvt::FatalError { reason } => {
 				tracing::error!(?reason, "renderer fatal error");
 				// TODO: Shutdown server
 			}
 			RenderEvt::PageFlip { monitors } => {
-				if monitors.is_empty() {
-					return;
-				}
-				let Some(active_session) = self.current_session else {
-					tracing::trace!("page flip ignored: no active session");
-					return;
-				};
-				let Some((_id, client)) = self
-					.connected_clients
-					.iter_mut()
-					.find(|(_, c)| c.client_view.authenticated_session() == Some(active_session))
-				else {
-					tracing::debug!(%active_session, "page flip ignored: no client bound to active session");
-					return;
-				};
-				let mut buffer_release = Vec::with_capacity(monitors.len());
-				// Acknowledge one pending swap per monitor per page flip and release previous front buffer.
-				for monitor in &monitors {
-					if let Some(pos) = self
-						.waiting_flip
-						.iter()
-						.position(|pending| pending.session_id == active_session && pending.monitor_id == *monitor)
-					{
-						let pending = self.waiting_flip.remove(pos);
-						let key = (active_session, *monitor);
-						if let Some(released) = self.front_buffers.insert(key, pending.buffer) {
-							self
-								.buffer_ownership
-								.insert((active_session, *monitor, released), BufferOwner::Client);
-							buffer_release.push(BufferRelease {
-								monitor_id: *monitor,
-								buffer: released,
-							});
-						}
-					}
-				}
-				if buffer_release.is_empty() {
-					return;
-				}
-				let frame_done_count = buffer_release.len() as u64;
-				if !client
-					.client_view
-					.notify_buffer_release(buffer_release)
-					.await
-				{
-					tracing::warn!(%active_session, "failed to forward buffer_release to client");
-				} else {
-					self.frame_done_emitted = self.frame_done_emitted.saturating_add(frame_done_count);
-				}
+				let _ = monitors;
 			}
 		}
 	}

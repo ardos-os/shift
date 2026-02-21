@@ -1,5 +1,6 @@
 use std::{
 	fmt::{Debug, Display},
+	os::fd::IntoRawFd,
 	os::unix::net::UnixStream,
 	sync::Arc,
 };
@@ -206,7 +207,7 @@ impl Client {
 			TabMessage::Hello(_hello_payload) => self.handle_unknown_msg("Hello").await,
 			TabMessage::AuthOk(_auth_ok_payload) => self.handle_unknown_msg("AuthOk").await,
 			TabMessage::AuthError(_auth_error_payload) => self.handle_unknown_msg("AuthError").await,
-			TabMessage::BufferRelease(_buffer_release_payload) => {
+			TabMessage::BufferRelease { .. } => {
 				self.handle_unknown_msg("BufferRelease").await
 			}
 			TabMessage::BufferRequestAck(_buffer_request_ack_payload) => {
@@ -319,9 +320,11 @@ impl Client {
 			S2CMsg::BufferRelease { buffers } => {
 				for buffer in buffers {
 					let payload = format!("{} {}", buffer.monitor_id, buffer.buffer as u8);
-					let send_result = TabMessageFrame::raw(message_header::BUFFER_RELEASE, payload)
-						.send_frame_to_async_fd(&self.socket)
-						.await;
+					let mut frame = TabMessageFrame::raw(message_header::BUFFER_RELEASE, payload);
+					if let Some(fd) = buffer.release_fence {
+						frame.fds.push(fd.into_raw_fd());
+					}
+					let send_result = frame.send_frame_to_async_fd(&self.socket).await;
 					if let Err(e) = send_result {
 						tracing::warn!(monitor_id = %buffer.monitor_id, buffer = buffer.buffer as u8, "failed to send buffer_release: {e}");
 						break;

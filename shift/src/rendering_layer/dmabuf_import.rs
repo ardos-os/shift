@@ -7,7 +7,7 @@ use std::{
 
 use easydrm::gl;
 use nix::unistd::close;
-use skia_safe::gpu;
+use skia_safe::{Image, gpu};
 use thiserror::Error;
 
 use crate::rendering_layer::egl;
@@ -186,7 +186,7 @@ impl DmaBufTexture {
 		Ok(SkiaDmaBufTexture {
 			backend_texture,
 			source: self,
-
+			cached_image: None,
 		})
 	}
 }
@@ -206,11 +206,26 @@ impl Drop for DmaBufTexture {
 pub struct SkiaDmaBufTexture {
 	pub backend_texture: gpu::BackendTexture,
 	source: DmaBufTexture,
+	cached_image: Option<Image>,
 }
 
 impl SkiaDmaBufTexture {
 	pub fn texture(&self) -> &gpu::BackendTexture {
 		&self.backend_texture
+	}
+
+	pub fn image<'a>(&'a mut self, gr: &mut gpu::DirectContext) -> Option<&'a Image> {
+		if self.cached_image.is_none() {
+			self.cached_image = Image::from_texture(
+				gr,
+				&self.backend_texture,
+				gpu::SurfaceOrigin::TopLeft,
+				skia_safe::ColorType::RGBA8888,
+				skia_safe::AlphaType::Opaque,
+				None,
+			);
+		}
+		self.cached_image.as_ref()
 	}
 	/// Splits into the skia texture and inner opengl texture
 	///
@@ -229,5 +244,10 @@ impl SkiaDmaBufTexture {
 				self.backend_texture.label(),
 			)
 		};
+		self.cached_image = None;
+	}
+
+	pub fn gl_texture_id(&self) -> gl::types::GLuint {
+		self.source.texture_id
 	}
 }

@@ -397,6 +397,7 @@ typedef enum {
 typedef struct {
     const char *monitor_id;
     uint32_t buffer_index;
+    int32_t release_fence_fd;
 } TabBufferRelease;
 
 typedef union {
