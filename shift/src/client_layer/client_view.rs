@@ -163,4 +163,31 @@ impl ClientView {
 			.await
 			.is_ok()
 	}
+
+	pub async fn notify_session_awake(&mut self, session_id: SessionId) -> bool {
+		self
+			.channels
+			.1
+			.send(S2CMsg::SessionAwake { session_id })
+			.await
+			.is_ok()
+	}
+
+	pub async fn notify_session_active(&mut self, session_id: SessionId) -> bool {
+		self
+			.channels
+			.1
+			.send(S2CMsg::SessionActive { session_id })
+			.await
+			.is_ok()
+	}
+
+	pub async fn notify_session_sleep(&mut self, session_id: SessionId) -> bool {
+		self
+			.channels
+			.1
+			.send(S2CMsg::SessionSleep { session_id })
+			.await
+			.is_ok()
+	}
 }

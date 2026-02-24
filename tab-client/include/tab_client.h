@@ -392,6 +392,9 @@ typedef enum {
     TAB_EVENT_SESSION_STATE = 3,
     TAB_EVENT_INPUT = 4,
     TAB_EVENT_SESSION_CREATED = 5,
+    TAB_EVENT_SESSION_AWAKE = 6,
+    TAB_EVENT_SESSION_SLEEP = 7,
+    TAB_EVENT_SESSION_ACTIVE = 8,
 } TabEventType;
 
 typedef struct {
@@ -405,6 +408,9 @@ typedef union {
     TabMonitorInfo monitor_added;
     const char *monitor_removed;
     TabSessionInfo session_state;
+    const char *session_awake;
+    const char *session_sleep;
+    const char *session_active;
     TabInputEvent input;
     const char *session_created_token;
 } TabEventData;

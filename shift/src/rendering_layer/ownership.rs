@@ -37,13 +37,24 @@ impl OwnershipManager {
 	pub fn ensure_current_session_monitors(&mut self, monitor_ids: &[MonitorId]) {
 		if let Some(session_id) = self.current_session {
 			for monitor_id in monitor_ids {
-				self.monitor_state.entry((*monitor_id, session_id)).or_default();
+				self
+					.monitor_state
+					.entry((*monitor_id, session_id))
+					.or_default();
 			}
 		}
 	}
 
 	pub fn current_slot_key(&self, monitor_id: MonitorId) -> Option<SlotKey> {
 		let session_id = self.current_session?;
+		self.current_slot_key_for_session(monitor_id, session_id)
+	}
+
+	pub fn current_slot_key_for_session(
+		&self,
+		monitor_id: MonitorId,
+		session_id: SessionId,
+	) -> Option<SlotKey> {
 		let state = self.monitor_state.get(&(monitor_id, session_id))?;
 		let buffer = state.current_buffer?;
 		Some(SlotKey::new(monitor_id, session_id, buffer))
@@ -57,8 +68,15 @@ impl OwnershipManager {
 		self.monitor_state.get_mut(&(monitor_id, session_id))
 	}
 
-	fn state_entry(&mut self, monitor_id: MonitorId, session_id: SessionId) -> &mut MonitorSurfaceState {
-		self.monitor_state.entry((monitor_id, session_id)).or_default()
+	fn state_entry(
+		&mut self,
+		monitor_id: MonitorId,
+		session_id: SessionId,
+	) -> &mut MonitorSurfaceState {
+		self
+			.monitor_state
+			.entry((monitor_id, session_id))
+			.or_default()
 	}
 
 	pub fn owner(&self, key: SlotKey) -> Option<SlotOwner> {
@@ -66,15 +84,11 @@ impl OwnershipManager {
 	}
 
 	pub fn mark_slot_client_owned(&mut self, key: SlotKey) {
-		self
-			.slot_ownership
-			.insert(key, SlotOwner::ClientOwned);
+		self.slot_ownership.insert(key, SlotOwner::ClientOwned);
 	}
 
 	pub fn mark_slot_shift_owned(&mut self, key: SlotKey) {
-		self
-			.slot_ownership
-			.insert(key, SlotOwner::ShiftOwned);
+		self.slot_ownership.insert(key, SlotOwner::ShiftOwned);
 	}
 
 	pub fn apply_swap_request(

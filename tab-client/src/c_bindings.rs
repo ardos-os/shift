@@ -14,7 +14,7 @@ use crate::{
 	TabClient,
 	config::TabClientConfig,
 	error::TabClientError,
-	events::{MonitorEvent, RenderEvent},
+	events::{MonitorEvent, RenderEvent, SessionEvent},
 	monitor::MonitorState,
 	swapchain::TabSwapchain,
 };
@@ -75,6 +75,9 @@ pub enum TabEventType {
 	TAB_EVENT_SESSION_STATE = 3,
 	TAB_EVENT_INPUT = 4,
 	TAB_EVENT_SESSION_CREATED = 5,
+	TAB_EVENT_SESSION_AWAKE = 6,
+	TAB_EVENT_SESSION_SLEEP = 7,
+	TAB_EVENT_SESSION_ACTIVE = 8,
 }
 
 #[repr(C)]
@@ -116,6 +119,9 @@ pub union TabEventData {
 	pub monitor_added: TabMonitorInfo,
 	pub monitor_removed: *mut c_char,
 	pub session_state: TabSessionInfo,
+	pub session_awake: *mut c_char,
+	pub session_sleep: *mut c_char,
+	pub session_active: *mut c_char,
 	pub input: TabInputEvent,
 	pub session_created_token: *mut c_char,
 }
@@ -442,6 +448,9 @@ enum PendingEvent {
 	BufferReleased(String, BufferIndex, Option<c_int>),
 	MonitorAdded(MonitorState),
 	MonitorRemoved(String),
+	SessionActive(String),
+	SessionAwake(String),
+	SessionSleep(String),
 }
 
 pub struct TabClientHandle {
@@ -480,6 +489,23 @@ impl TabClientHandle {
 						*buffer,
 						*release_fence_fd,
 					)),
+				}
+			});
+		}
+		{
+			let q = queue.clone();
+			client.on_session_event(move |evt| {
+				let mut guard = q.borrow_mut();
+				match evt {
+					SessionEvent::Active(session_id) => {
+						guard.push_back(PendingEvent::SessionActive(session_id.clone()))
+					}
+					SessionEvent::Awake(session_id) => {
+						guard.push_back(PendingEvent::SessionAwake(session_id.clone()))
+					}
+					SessionEvent::Sleep(session_id) => {
+						guard.push_back(PendingEvent::SessionSleep(session_id.clone()))
+					}
 				}
 			});
 		}
@@ -800,6 +826,21 @@ pub unsafe extern "C" fn tab_client_next_event(
 					true
 				}
 			}
+			PendingEvent::SessionAwake(session_id) => {
+				(*event).event_type = TabEventType::TAB_EVENT_SESSION_AWAKE;
+				(*event).data.session_awake = dup_string(&session_id);
+				true
+			}
+			PendingEvent::SessionActive(session_id) => {
+				(*event).event_type = TabEventType::TAB_EVENT_SESSION_ACTIVE;
+				(*event).data.session_active = dup_string(&session_id);
+				true
+			}
+			PendingEvent::SessionSleep(session_id) => {
+				(*event).event_type = TabEventType::TAB_EVENT_SESSION_SLEEP;
+				(*event).data.session_sleep = dup_string(&session_id);
+				true
+			}
 		}
 	}
 }
@@ -825,6 +866,24 @@ pub unsafe extern "C" fn tab_client_free_event_strings(event: *mut TabEvent) {
 				if !(*event).data.monitor_removed.is_null() {
 					drop(CString::from_raw((*event).data.monitor_removed));
 					(*event).data.monitor_removed = ptr::null_mut();
+				}
+			}
+			TabEventType::TAB_EVENT_SESSION_AWAKE => {
+				if !(*event).data.session_awake.is_null() {
+					drop(CString::from_raw((*event).data.session_awake));
+					(*event).data.session_awake = ptr::null_mut();
+				}
+			}
+			TabEventType::TAB_EVENT_SESSION_SLEEP => {
+				if !(*event).data.session_sleep.is_null() {
+					drop(CString::from_raw((*event).data.session_sleep));
+					(*event).data.session_sleep = ptr::null_mut();
+				}
+			}
+			TabEventType::TAB_EVENT_SESSION_ACTIVE => {
+				if !(*event).data.session_active.is_null() {
+					drop(CString::from_raw((*event).data.session_active));
+					(*event).data.session_active = ptr::null_mut();
 				}
 			}
 			TabEventType::TAB_EVENT_MONITOR_ADDED => {

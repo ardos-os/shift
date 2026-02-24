@@ -63,3 +63,60 @@ view:
 
 clean:
     rm -rf {{PROFILING_BASE_DIR}}
+
+test-harness switch_ms="2500": build-with-debug-symbols
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    if [ -z "${HYPRLAND_BIN:-}" ]; then
+        echo "❌ Erro: \$HYPRLAND_BIN não definida no .env"
+        exit 1
+    fi
+    if [ ! -x "$HYPRLAND_BIN" ]; then
+        echo "❌ Erro: HYPRLAND_BIN não é executável: $HYPRLAND_BIN"
+        exit 1
+    fi
+
+    ROOT="$(pwd)"
+    TEST_ROOT="$ROOT/test"
+    ASSET_ADMIN="$TEST_ROOT/assets/session1.mp4"
+    ASSET_SECOND="$TEST_ROOT/assets/session2.gif"
+    PLAYER="$TEST_ROOT/scripts/play-media.sh"
+    ADMIN_CFG="/tmp/shift-admin-test.conf"
+    SECOND_CFG="/tmp/shift-second-test.conf"
+
+    if [ ! -f "$ASSET_ADMIN" ]; then
+        echo "❌ Asset ausente: $ASSET_ADMIN"
+        exit 1
+    fi
+    if [ ! -f "$ASSET_SECOND" ]; then
+        echo "❌ Asset ausente: $ASSET_SECOND"
+        exit 1
+    fi
+    if [ ! -x "$PLAYER" ]; then
+        chmod +x "$PLAYER"
+    fi
+
+    printf '%s\n' \
+      'monitor=,preferred,auto,1' \
+      'misc {' \
+      '  disable_hyprland_logo = true' \
+      '}' \
+      "exec-once = $PLAYER \"$ASSET_ADMIN\"" > "$ADMIN_CFG"
+
+    printf '%s\n' \
+      'monitor=,preferred,auto,1' \
+      'misc {' \
+      '  disable_hyprland_logo = true' \
+      '}' \
+      "exec-once = $PLAYER \"$ASSET_SECOND\"" > "$SECOND_CFG"
+
+    export SHIFT_DEBUG_AUTO_SWITCH_INTERVAL_MS="{{switch_ms}}"
+    export SHIFT_DEBUG_SECOND_SESSION_CMD="$HYPRLAND_BIN --config $SECOND_CFG"
+    export ADMIN_LAUNCH_CMD="$HYPRLAND_BIN --config $ADMIN_CFG"
+
+    echo "🚀 Starting Shift test harness"
+    echo "   - admin media:  $ASSET_ADMIN"
+    echo "   - second media: $ASSET_SECOND"
+    echo "   - auto switch:  ${SHIFT_DEBUG_AUTO_SWITCH_INTERVAL_MS}ms"
+    cargo run --bin shift --profile release-with-debug

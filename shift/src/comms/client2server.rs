@@ -1,6 +1,8 @@
 use std::os::fd::OwnedFd;
 
-use tab_protocol::{BufferIndex, FramebufferLinkPayload, SessionCreatePayload};
+use tab_protocol::{
+	BufferIndex, FramebufferLinkPayload, SessionCreatePayload, SessionSwitchPayload,
+};
 
 use crate::{auth::Token, monitor::MonitorId};
 #[derive(Debug)]
@@ -8,6 +10,7 @@ pub enum C2SMsg {
 	Shutdown,
 	Auth(Token),
 	CreateSession(SessionCreatePayload),
+	SwitchSession(SessionSwitchPayload),
 	BufferRequest {
 		monitor_id: MonitorId,
 		buffer: BufferIndex,

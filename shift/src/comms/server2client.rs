@@ -6,7 +6,7 @@ use tab_protocol::BufferIndex;
 use crate::{
 	auth::{self, Token},
 	monitor::{Monitor, MonitorId},
-	sessions::{PendingSession, Session},
+	sessions::{PendingSession, Session, SessionId},
 };
 
 #[derive(Debug)]
@@ -32,6 +32,15 @@ pub enum S2CMsg {
 	BufferRequestAck {
 		monitor_id: MonitorId,
 		buffer: BufferIndex,
+	},
+	SessionActive {
+		session_id: SessionId,
+	},
+	SessionAwake {
+		session_id: SessionId,
+	},
+	SessionSleep {
+		session_id: SessionId,
 	},
 	MonitorAdded {
 		monitor: Monitor,

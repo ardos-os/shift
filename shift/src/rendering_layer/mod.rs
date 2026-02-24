@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+mod animation;
 pub mod channels;
 mod commands;
 pub mod dmabuf_import;
@@ -13,13 +14,17 @@ mod surface_cache;
 
 use easydrm::EasyDRM;
 use skia_safe::gpu;
-use std::{collections::HashMap, time::Duration};
+use std::{
+	collections::HashMap,
+	time::{Duration, Instant as StdInstant},
+};
 #[cfg(debug_assertions)]
 use std::{fs, time::Instant};
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tracing::warn;
 
+use crate::comms::server2render::SessionTransition;
 use crate::{
 	comms::{
 		render2server::{RenderEvt, RenderEvtTx},
@@ -28,6 +33,7 @@ use crate::{
 	monitor::{Monitor as ServerLayerMonitor, MonitorId},
 	sessions::SessionId,
 };
+use animation::AnimationRegistry;
 use channels::RenderingEnd;
 use dmabuf_import::SkiaDmaBufTexture;
 use fence_scheduler::{FenceScheduler, FenceTaskHandle, FenceWaitMode};
@@ -66,23 +72,59 @@ pub struct RenderingLayer {
 	fence_event_rx: mpsc::UnboundedReceiver<FenceEvent>,
 	fence_scheduler: FenceScheduler,
 	fence_tasks: HashMap<SlotKey, FenceTaskHandle>,
+	animations: AnimationRegistry,
+	active_transition: Option<ActiveTransition>,
 	#[cfg(debug_assertions)]
 	fd_guard_limit: usize,
 	#[cfg(debug_assertions)]
 	fd_guard_last_check: Instant,
 }
 
+#[derive(Debug, Clone)]
+struct ActiveTransition {
+	from_session_id: SessionId,
+	to_session_id: SessionId,
+	animation: String,
+	started_at: StdInstant,
+	duration: Duration,
+}
+
+impl ActiveTransition {
+	fn from_cmd(to_session_id: SessionId, transition: SessionTransition) -> Option<Self> {
+		if transition.duration.is_zero() {
+			return None;
+		}
+		Some(Self {
+			from_session_id: transition.from_session_id,
+			to_session_id,
+			animation: transition.animation,
+			started_at: StdInstant::now(),
+			duration: transition.duration,
+		})
+	}
+
+	fn progress(&self, now: StdInstant) -> f64 {
+		if self.duration.is_zero() {
+			return 1.0;
+		}
+		let elapsed = now.saturating_duration_since(self.started_at);
+		(elapsed.as_secs_f64() / self.duration.as_secs_f64()).clamp(0.0, 1.0)
+	}
+}
+
 impl RenderingLayer {
 	#[tracing::instrument(skip_all)]
 	pub fn init(channels: RenderingEnd) -> Result<Self, RenderError> {
 		let (command_rx, event_tx) = channels.into_parts();
-		let drm = EasyDRM::init(|req| {
-			MonitorRenderState::new(req).expect("MonitorRenderState::new failed")
-		})?;
-		drm.make_current().map_err(|_| RenderError::SkiaGlInterface)?;
-		let interface =
-			gpu::gl::Interface::new_load_with(|s| drm.get_proc_address(s)).ok_or(RenderError::SkiaGlInterface)?;
-		let gr = gpu::direct_contexts::make_gl(interface, None).ok_or(RenderError::SkiaDirectContext)?;
+		let drm =
+			EasyDRM::init(|req| MonitorRenderState::new(req).expect("MonitorRenderState::new failed"))?;
+		drm
+			.make_current()
+			.map_err(|_| RenderError::SkiaGlInterface)?;
+		let interface = gpu::gl::Interface::new_load_with(|s| drm.get_proc_address(s))
+			.ok_or(RenderError::SkiaGlInterface)?;
+		let gr =
+			gpu::direct_contexts::make_gl(interface, None).ok_or(RenderError::SkiaDirectContext)?;
 		let (fence_event_tx, fence_event_rx) = mpsc::unbounded_channel();
 
 		Ok(Self {
@@ -97,6 +139,8 @@ impl RenderingLayer {
 			fence_event_rx,
 			fence_scheduler: FenceScheduler::new(),
 			fence_tasks: HashMap::new(),
+			animations: AnimationRegistry::new(),
+			active_transition: None,
 			#[cfg(debug_assertions)]
 			fd_guard_limit: std::env::var("SHIFT_MAX_OPEN_FDS")
 				.ok()

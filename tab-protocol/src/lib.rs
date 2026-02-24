@@ -62,6 +62,8 @@ pub enum TabMessage {
 	SessionReady(SessionReadyPayload),
 	SessionState(SessionStatePayload),
 	SessionActive(SessionActivePayload),
+	SessionAwake(SessionAwakePayload),
+	SessionSleep(SessionSleepPayload),
 	Error(ErrorPayload),
 	Ping,
 	Pong,
@@ -218,6 +220,14 @@ impl TabMessage {
 			message_header::SESSION_ACTIVE => {
 				let payload: SessionActivePayload = msg.expect_payload_json()?;
 				Ok(TabMessage::SessionActive(payload))
+			}
+			message_header::SESSION_AWAKE => {
+				let payload: SessionAwakePayload = msg.expect_payload_json()?;
+				Ok(TabMessage::SessionAwake(payload))
+			}
+			message_header::SESSION_SLEEP => {
+				let payload: SessionSleepPayload = msg.expect_payload_json()?;
+				Ok(TabMessage::SessionSleep(payload))
 			}
 			message_header::ERROR => {
 				let payload: ErrorPayload = msg.expect_payload_json()?;
@@ -617,6 +627,16 @@ pub struct SessionStatePayload {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionActivePayload {
+	pub session_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionAwakePayload {
+	pub session_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionSleepPayload {
 	pub session_id: String,
 }
 

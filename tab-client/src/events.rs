@@ -18,3 +18,10 @@ pub enum RenderEvent {
 		release_fence_fd: Option<RawFd>,
 	},
 }
+
+#[derive(Debug, Clone)]
+pub enum SessionEvent {
+	Active(String),
+	Awake(String),
+	Sleep(String),
+}

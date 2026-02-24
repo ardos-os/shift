@@ -6,10 +6,8 @@ use std::{
 use crate::comms::server2render::RenderCmd;
 
 use super::dmabuf_import::{DmaBufTexture, ImportParams as DmaBufImportParams};
-use super::{
-	RenderError, RenderEvt, RenderingLayer, SlotKey,
-};
 use super::state::BufferSlot;
+use super::{RenderError, RenderEvt, RenderingLayer, SlotKey};
 
 impl RenderingLayer {
 	#[tracing::instrument(skip_all, fields(session_id = %session_id, monitor_id = %payload.monitor_id))]
@@ -75,19 +73,19 @@ impl RenderingLayer {
 			return;
 		}
 
-			for (slot, texture) in imported {
-				let key = SlotKey::new(monitor_id, session_id, slot);
-				self.slots.insert(key, texture);
-				self.ownership.mark_slot_client_owned(key);
-			}
+		for (slot, texture) in imported {
+			let key = SlotKey::new(monitor_id, session_id, slot);
+			self.slots.insert(key, texture);
+			self.ownership.mark_slot_client_owned(key);
 		}
+	}
 
-		pub(super) async fn process_deferred_releases(&mut self, release_fence: i32) {
-			for item in self.ownership.take_deferred_releases() {
-				let key = SlotKey::new(item.monitor_id, item.session_id, item.buffer);
-				self.ownership.mark_slot_client_owned(key);
-				let release_fence = if release_fence >= 0 {
-					let dup_fd = unsafe { libc::dup(release_fence) };
+	pub(super) async fn process_deferred_releases(&mut self, release_fence: i32) {
+		for item in self.ownership.take_deferred_releases() {
+			let key = SlotKey::new(item.monitor_id, item.session_id, item.buffer);
+			self.ownership.mark_slot_client_owned(key);
+			let release_fence = if release_fence >= 0 {
+				let dup_fd = unsafe { libc::dup(release_fence) };
 				if dup_fd >= 0 {
 					Some(unsafe { OwnedFd::from_raw_fd(dup_fd) })
 				} else {
@@ -121,7 +119,16 @@ impl RenderingLayer {
 			} => {
 				self.import_framebuffers(payload, dma_bufs, session_id);
 			}
-			RenderCmd::SetActiveSession { session_id } => {
+			RenderCmd::SetActiveSession {
+				session_id,
+				transition,
+			} => {
+				self.active_transition = None;
+				if let Some(to_session_id) = session_id
+					&& let Some(transition) = transition
+				{
+					self.active_transition = super::ActiveTransition::from_cmd(to_session_id, transition);
+				}
 				self.ownership.set_current_session(session_id);
 			}
 			RenderCmd::SessionRemoved { session_id } => {
@@ -157,9 +164,10 @@ impl RenderingLayer {
 						.await;
 				} else {
 					let has_acquire_fence = acquire_fence.is_some();
-					let transition = self
-						.ownership
-						.apply_swap_request(monitor_id, session_id, slot, has_acquire_fence);
+					let transition =
+						self
+							.ownership
+							.apply_swap_request(monitor_id, session_id, slot, has_acquire_fence);
 					if let Some(pending) = transition.canceled_pending {
 						let pending_key = SlotKey::new(monitor_id, session_id, pending);
 						self.cancel_fence_wait(pending_key);

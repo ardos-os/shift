@@ -7,6 +7,7 @@ use std::{
 	path::{Path, PathBuf},
 	process::Command,
 	sync::Arc,
+	time::Duration,
 };
 
 use futures::future::select_all;
@@ -16,6 +17,7 @@ use tokio::{
 	io::unix::AsyncFd,
 	net::{UnixListener, UnixStream, unix::SocketAddr},
 	task::JoinHandle as TokioJoinHandle,
+	time::Instant,
 };
 use tracing::error;
 
@@ -30,7 +32,7 @@ use crate::{
 		client2server::C2SMsg,
 		render2server::{RenderEvt, RenderEvtRx},
 		server2client::BufferRelease,
-		server2render::{RenderCmd, RenderCmdTx},
+		server2render::{RenderCmd, RenderCmdTx, SessionTransition},
 	},
 	monitor::{Monitor, MonitorId},
 	rendering_layer::channels::ServerEnd as RenderServerChannels,
@@ -71,6 +73,8 @@ pub struct ShiftServer {
 	current_session: Option<SessionId>,
 	pending_sessions: HashMap<Token, PendingSession>,
 	active_sessions: HashMap<SessionId, Arc<Session>>,
+	awake_sessions: HashSet<SessionId>,
+	awake_until: HashMap<SessionId, Instant>,
 	connected_clients: HashMap<ClientId, ConnectedClient>,
 	render_commands: RenderCmdTx,
 	render_events: RenderEvtRx,
@@ -81,6 +85,11 @@ pub struct ShiftServer {
 	buffer_ownership: HashMap<(SessionId, MonitorId, tab_protocol::BufferIndex), BufferOwner>,
 	swap_buffers_received: u64,
 	frame_done_emitted: u64,
+	debug_second_session_cmd: Option<String>,
+	debug_second_session_spawned: bool,
+	debug_admin_session_id: Option<SessionId>,
+	debug_second_session_id: Option<SessionId>,
+	debug_auto_switch_interval: Option<Duration>,
 }
 #[derive(Error, Debug)]
 pub enum BindError {
@@ -97,11 +106,30 @@ impl ShiftServer {
 		let listener = UnixListener::bind(&path)?;
 		std::fs::set_permissions(&path, Permissions::from_mode(0o7777)).ok();
 		let (render_events, render_commands) = render_channels.into_parts();
+		let debug_second_session_cmd = std::env::var("SHIFT_DEBUG_SECOND_SESSION_CMD")
+			.ok()
+			.map(|v| v.trim().to_string())
+			.filter(|v| !v.is_empty());
+		let debug_auto_switch_interval = std::env::var("SHIFT_DEBUG_AUTO_SWITCH_INTERVAL_MS")
+			.ok()
+			.and_then(|raw| match raw.parse::<u64>() {
+				Ok(ms) if ms > 0 => Some(Duration::from_millis(ms)),
+				Ok(_) => None,
+				Err(e) => {
+					tracing::warn!(
+						value = %raw,
+						"invalid SHIFT_DEBUG_AUTO_SWITCH_INTERVAL_MS: {e}"
+					);
+					None
+				}
+			});
 		Ok(Self {
 			listener: Some(listener),
 			current_session: Default::default(),
 			pending_sessions: Default::default(),
 			active_sessions: Default::default(),
+			awake_sessions: Default::default(),
+			awake_until: Default::default(),
 			connected_clients: Default::default(),
 			render_commands,
 			render_events,
@@ -112,8 +140,181 @@ impl ShiftServer {
 			buffer_ownership: Default::default(),
 			swap_buffers_received: 0,
 			frame_done_emitted: 0,
+			debug_second_session_cmd,
+			debug_second_session_spawned: false,
+			debug_admin_session_id: None,
+			debug_second_session_id: None,
+			debug_auto_switch_interval,
 		})
 	}
+
+	fn maybe_spawn_debug_second_session(&mut self, admin_session_id: SessionId) {
+		let Some(cmdline) = self.debug_second_session_cmd.clone() else {
+			return;
+		};
+		if self.debug_second_session_spawned {
+			return;
+		}
+		self.debug_second_session_spawned = true;
+		self.debug_admin_session_id.get_or_insert(admin_session_id);
+		let (token, pending_session) = PendingSession::normal(Some("Debug Session 2".into()));
+		let session_id = pending_session.id();
+		self.pending_sessions.insert(token.clone(), pending_session);
+		let shell = std::env::var("SHELL").unwrap_or_else(|_| "bash".to_string());
+		let mut cmd = Command::new(shell);
+		cmd.args(["-c", &cmdline]);
+		cmd.env("SHIFT_SESSION_TOKEN", token.to_string());
+		match cmd.spawn() {
+			Ok(child) => {
+				self.debug_second_session_id = Some(session_id);
+				tracing::info!(
+					%session_id,
+					pid = child.id(),
+					"spawned SHIFT_DEBUG_SECOND_SESSION_CMD"
+				);
+			}
+			Err(e) => {
+				self.debug_second_session_spawned = false;
+				self.debug_second_session_id = None;
+				self.pending_sessions.remove(&token);
+				tracing::error!("failed to spawn SHIFT_DEBUG_SECOND_SESSION_CMD: {e}");
+			}
+		}
+	}
+
+	async fn handle_debug_auto_switch_tick(&mut self) {
+		let Some(admin_session_id) = self.debug_admin_session_id else {
+			return;
+		};
+		let Some(second_session_id) = self.debug_second_session_id else {
+			return;
+		};
+		if !self.active_sessions.contains_key(&admin_session_id)
+			|| !self.active_sessions.contains_key(&second_session_id)
+		{
+			return;
+		}
+		let target = match self.current_session {
+			Some(id) if id == admin_session_id => second_session_id,
+			Some(id) if id == second_session_id => admin_session_id,
+			_ => second_session_id,
+		};
+		if self.current_session == Some(target) {
+			return;
+		}
+		let previous = self.current_session;
+		tracing::info!(%target, "debug auto-switch session");
+		let transition = previous.and_then(|from_session_id| {
+			if from_session_id == target {
+				return None;
+			}
+			Some(SessionTransition {
+				from_session_id,
+				animation: "blur".to_string(),
+				duration: Duration::from_millis(500),
+			})
+		});
+		if let Some(from_session_id) = previous
+			&& from_session_id != target
+		{
+			self
+				.keep_session_awake_for(from_session_id, Duration::from_millis(500))
+				.await;
+		}
+		self.update_active_session(Some(target), transition).await;
+	}
+
+	async fn notify_session_awake_change(&mut self, session_id: SessionId, awake: bool) {
+		let target_clients = self
+			.connected_clients
+			.iter()
+			.filter_map(|(id, client)| {
+				(client.client_view.authenticated_session() == Some(session_id)).then_some(*id)
+			})
+			.collect::<Vec<_>>();
+		for id in target_clients {
+			let Some(client) = self.connected_clients.get_mut(&id) else {
+				continue;
+			};
+			let notified = if awake {
+				client.client_view.notify_session_awake(session_id).await
+			} else {
+				client.client_view.notify_session_sleep(session_id).await
+			};
+			if !notified {
+				tracing::warn!(%id, %session_id, awake, "failed to notify session awake state");
+			}
+		}
+	}
+
+	async fn prune_expired_awake_sessions(&mut self) {
+		let now = Instant::now();
+		let mut expired = Vec::new();
+		for (session_id, deadline) in &self.awake_until {
+			if *deadline <= now {
+				expired.push(*session_id);
+			}
+		}
+		for session_id in expired {
+			self.awake_until.remove(&session_id);
+			if self.current_session != Some(session_id) {
+				if self.awake_sessions.remove(&session_id) {
+					self.notify_session_awake_change(session_id, false).await;
+				}
+			}
+		}
+	}
+
+	async fn set_awake_sessions(&mut self, sessions: impl IntoIterator<Item = SessionId>) {
+		let now = Instant::now();
+		let old_awake = self.awake_sessions.clone();
+		self.awake_sessions.clear();
+		for session_id in sessions {
+			self.awake_sessions.insert(session_id);
+		}
+		for (session_id, deadline) in &self.awake_until {
+			if *deadline > now {
+				self.awake_sessions.insert(*session_id);
+			}
+		}
+		self
+			.awake_until
+			.retain(|session_id, _| self.awake_sessions.contains(session_id));
+		let went_to_sleep = old_awake
+			.difference(&self.awake_sessions)
+			.copied()
+			.collect::<Vec<_>>();
+		let woke_up = self
+			.awake_sessions
+			.difference(&old_awake)
+			.copied()
+			.collect::<Vec<_>>();
+		for session_id in went_to_sleep {
+			self.notify_session_awake_change(session_id, false).await;
+		}
+		for session_id in woke_up {
+			self.notify_session_awake_change(session_id, true).await;
+		}
+	}
+
+	async fn keep_session_awake_for(&mut self, session_id: SessionId, duration: Duration) {
+		if duration.is_zero() {
+			return;
+		}
+		let was_awake = self.awake_sessions.insert(session_id);
+		self
+			.awake_until
+			.insert(session_id, Instant::now() + duration);
+		if !was_awake {
+			self.notify_session_awake_change(session_id, true).await;
+		}
+	}
+
+	async fn is_session_awake(&mut self, session_id: SessionId) -> bool {
+		self.prune_expired_awake_sessions().await;
+		self.awake_sessions.contains(&session_id)
+	}
+
 	#[tracing::instrument(level= "info", skip(self), fields(connected_clients=self.connected_clients.len(), active_sessions=self.active_sessions.len(), pending_sessions = self.pending_sessions.len(), current_session = ?self.current_session))]
 	pub fn add_initial_session(&mut self) -> Token {
 		let (token, session) = PendingSession::admin(Some("Admin".into()));
@@ -136,6 +337,7 @@ impl ShiftServer {
 	pub async fn start(mut self) {
 		let listener = self.listener.take().unwrap();
 		let mut stats_tick = tokio::time::interval(std::time::Duration::from_secs(1));
+		let mut debug_auto_switch_tick = self.debug_auto_switch_interval.map(tokio::time::interval);
 		loop {
 			let span = tracing::trace_span!(
 				"server_loop",
@@ -149,8 +351,9 @@ impl ShiftServer {
 			tokio::select! {
 					client_message = Self::read_clients_messages(&mut self.connected_clients) => self.handle_client_message(client_message.0, client_message.1).await,
 					accept_result = listener.accept() => self.handle_accept(accept_result).await,
-					_ = stats_tick.tick() => {
-							if self.swap_buffers_received > 0 || self.frame_done_emitted > 0 {
+						_ = stats_tick.tick() => {
+								self.prune_expired_awake_sessions().await;
+								if self.swap_buffers_received > 0 || self.frame_done_emitted > 0 {
 									tracing::trace!(
 											swap_buffers_received = self.swap_buffers_received,
 											frame_done_emitted = self.frame_done_emitted,
@@ -167,6 +370,15 @@ impl ShiftServer {
 									tracing::warn!("render layer event channel closed");
 									return;
 							}
+					}
+					_ = async {
+						if let Some(tick) = &mut debug_auto_switch_tick {
+							tick.tick().await;
+						} else {
+							pending::<()>().await;
+						}
+					} => {
+						self.handle_debug_auto_switch_tick().await;
 					}
 			}
 		}
@@ -207,8 +419,26 @@ impl ShiftServer {
 				self
 					.active_sessions
 					.insert(session.id(), Arc::clone(&session));
+				if session.role() == Role::Admin {
+					self.debug_admin_session_id.get_or_insert(session.id());
+					self.maybe_spawn_debug_second_session(session.id());
+				}
 				if session.role() == Role::Admin && self.current_session.is_none() {
-					self.update_active_session(Some(session.id())).await;
+					self.update_active_session(Some(session.id()), None).await;
+				} else if self.awake_sessions.contains(&session.id()) {
+					if let Some(client) = self.connected_clients.get_mut(&client_id) {
+						client.client_view.notify_session_awake(session.id()).await;
+					}
+				} else if let Some(client) = self.connected_clients.get_mut(&client_id) {
+					client.client_view.notify_session_sleep(session.id()).await;
+				}
+				if let Some(active_session_id) = self.current_session {
+					if let Some(client) = self.connected_clients.get_mut(&client_id) {
+						client
+							.client_view
+							.notify_session_active(active_session_id)
+							.await;
+					}
 				}
 			}
 			C2SMsg::CreateSession(req) => {
@@ -260,6 +490,83 @@ impl ShiftServer {
 					self.disconnect_client(client_id).await;
 				}
 			}
+			C2SMsg::SwitchSession(payload) => {
+				let target_session = match payload.session_id.parse::<SessionId>() {
+					Ok(session_id) => session_id,
+					Err(e) => {
+						if let Some(client) = self.connected_clients.get_mut(&client_id) {
+							client
+								.client_view
+								.notify_error(
+									"invalid_session_id".into(),
+									Some(Arc::<str>::from(e.to_string())),
+									false,
+								)
+								.await;
+						}
+						return;
+					}
+				};
+				let Some(connected_client) = self.connected_clients.get(&client_id) else {
+					tracing::warn!("tried handling message from a non-existing client");
+					return;
+				};
+				let requester_session = connected_client
+					.client_view
+					.authenticated_session()
+					.and_then(|s| self.active_sessions.get(&s))
+					.map(Arc::clone);
+				let Some(requester_session) = requester_session else {
+					if let Some(client) = self.connected_clients.get_mut(&client_id) {
+						client
+							.client_view
+							.notify_error("forbidden".into(), None, false)
+							.await;
+					}
+					return;
+				};
+				if requester_session.role() != Role::Admin {
+					if let Some(client) = self.connected_clients.get_mut(&client_id) {
+						client
+							.client_view
+							.notify_error("forbidden".into(), None, false)
+							.await;
+					}
+					return;
+				}
+				if !self.active_sessions.contains_key(&target_session) {
+					if let Some(client) = self.connected_clients.get_mut(&client_id) {
+						client
+							.client_view
+							.notify_error(
+								"unknown_session".into(),
+								Some(Arc::<str>::from("target session is not active")),
+								false,
+							)
+							.await;
+					}
+					return;
+				}
+				let previous = self.current_session;
+				let transition = match (previous, payload.animation.clone()) {
+					(Some(from_session_id), Some(animation))
+						if from_session_id != target_session && payload.duration > Duration::ZERO =>
+					{
+						self
+							.keep_session_awake_for(from_session_id, payload.duration)
+							.await;
+						Some(SessionTransition {
+							from_session_id,
+							animation,
+							duration: payload.duration,
+						})
+					}
+					_ => None,
+				};
+				self
+					.update_active_session(Some(target_session), transition)
+					.await;
+			}
 			C2SMsg::BufferRequest {
 				monitor_id,
 				buffer,
@@ -283,6 +590,19 @@ impl ShiftServer {
 					}
 					return;
 				};
+				if !self.is_session_awake(client_session.id()).await {
+					if let Some(client) = self.connected_clients.get_mut(&client_id) {
+						client
+							.client_view
+							.notify_error(
+								"session_sleeping".into(),
+								Some("session is not awake".into()),
+								false,
+							)
+							.await;
+					}
+					return;
+				}
 				let owner_key = (client_session.id(), monitor_id, buffer);
 				let current_owner = self
 					.buffer_ownership
@@ -493,15 +813,15 @@ impl ShiftServer {
 				else {
 					return;
 				};
-					if !client
-						.client_view
-						.notify_buffer_release(vec![BufferRelease {
-							monitor_id,
-							buffer,
-							release_fence,
-						}])
-						.await
-					{
+				if !client
+					.client_view
+					.notify_buffer_release(vec![BufferRelease {
+						monitor_id,
+						buffer,
+						release_fence,
+					}])
+					.await
+				{
 					tracing::warn!(%session_id, %monitor_id, buffer = buffer as u8, "failed to send early buffer_release");
 				} else {
 					self.frame_done_emitted = self.frame_done_emitted.saturating_add(1);
@@ -612,6 +932,8 @@ impl ShiftServer {
 		};
 		if let Some(session_id) = client.client_view.authenticated_session() {
 			self.active_sessions.remove(&session_id);
+			self.awake_sessions.remove(&session_id);
+			self.awake_until.remove(&session_id);
 			self
 				.pending_buffer_requests
 				.retain(|pending| pending.client_id != client_id && pending.session_id != session_id);
@@ -632,16 +954,40 @@ impl ShiftServer {
 				tracing::error!("failed to notify renderer about session removal: {e}");
 			}
 			if self.current_session == Some(session_id) {
-				self.update_active_session(None).await;
+				self.update_active_session(None, None).await;
 			}
 		}
 	}
 
-	async fn update_active_session(&mut self, next: Option<SessionId>) {
+	async fn update_active_session(
+		&mut self,
+		next: Option<SessionId>,
+		transition: Option<SessionTransition>,
+	) {
 		self.current_session = next;
+		self.prune_expired_awake_sessions().await;
+		self.set_awake_sessions(next.into_iter()).await;
+		if let Some(active_session_id) = next {
+			let target_clients = self
+				.connected_clients
+				.iter()
+				.filter_map(|(id, client)| client.client_view.authenticated_session().map(|_| *id))
+				.collect::<Vec<_>>();
+			for id in target_clients {
+				if let Some(client) = self.connected_clients.get_mut(&id) {
+					client
+						.client_view
+						.notify_session_active(active_session_id)
+						.await;
+				}
+			}
+		}
 		if let Err(e) = self
 			.render_commands
-			.send(RenderCmd::SetActiveSession { session_id: next })
+			.send(RenderCmd::SetActiveSession {
+				session_id: next,
+				transition,
+			})
 			.await
 		{
 			tracing::error!("failed to notify renderer about active session change: {e}");
