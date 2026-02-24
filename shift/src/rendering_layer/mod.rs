@@ -3,22 +3,27 @@
 pub mod channels;
 pub mod dmabuf_import;
 mod egl;
+mod fence_scheduler;
 
-use easydrm::{gl::{self, COLOR_BUFFER_BIT, DEPTH_BUFFER_BIT}, EasyDRM, Monitor, MonitorContextCreationRequest};
+use easydrm::{
+	EasyDRM, Monitor, MonitorContextCreationRequest,
+	gl::{self, COLOR_BUFFER_BIT, DEPTH_BUFFER_BIT},
+};
 use skia_safe::{
-	self as skia, FilterMode, MipmapMode, Paint, SamplingOptions, gpu,
-	gpu::gl::FramebufferInfo,
+	self as skia, FilterMode, MipmapMode, Paint, SamplingOptions, gpu, gpu::gl::FramebufferInfo,
 };
 use std::{
 	collections::HashMap,
 	hash::Hash,
-	io::ErrorKind,
-	os::fd::{AsRawFd, FromRawFd, OwnedFd},
+	os::fd::{AsFd, FromRawFd, OwnedFd},
 	sync::Arc,
+	time::Duration,
 };
+#[cfg(debug_assertions)]
+use std::{fs, time::Instant};
 use tab_protocol::BufferIndex;
 use thiserror::Error;
-use tokio::{io::unix::AsyncFd, sync::mpsc, task::JoinHandle};
+use tokio::sync::mpsc;
 use tracing::warn;
 
 use crate::{
@@ -31,6 +36,7 @@ use crate::{
 };
 use channels::RenderingEnd;
 use dmabuf_import::{DmaBufTexture, ImportParams as DmaBufImportParams, SkiaDmaBufTexture};
+use fence_scheduler::{FenceScheduler, FenceTaskHandle, FenceWaitMode};
 // -----------------------------
 // Errors
 // -----------------------------
@@ -48,6 +54,10 @@ pub enum RenderError {
 
 	#[error("skia surface creation failed")]
 	SkiaSurface,
+
+	#[cfg(debug_assertions)]
+	#[error("open fd guard exceeded: {count} > {limit}")]
+	OpenFdGuardExceeded { count: usize, limit: usize },
 }
 
 // -----------------------------
@@ -55,10 +65,10 @@ pub enum RenderError {
 // -----------------------------
 
 pub struct MonitorRenderState {
-	pub gr: gpu::DirectContext,
-	pub surface: skia::Surface,
+	pub surfaces_by_fbo: HashMap<i32, skia::Surface>,
 	pub width: usize,
 	pub height: usize,
+	pub target_fbo: i32,
 	pub gl: gl::Gles2,
 	pub id: MonitorId,
 }
@@ -66,41 +76,51 @@ pub struct MonitorRenderState {
 impl MonitorRenderState {
 	#[tracing::instrument(skip_all)]
 	fn new(req: &MonitorContextCreationRequest<'_>) -> Result<Self, RenderError> {
-		let interface = gpu::gl::Interface::new_load_with(|s| (req.get_proc_address)(s))
-			.ok_or(RenderError::SkiaGlInterface)?;
-
-		let mut gr =
-			gpu::direct_contexts::make_gl(interface, None).ok_or(RenderError::SkiaDirectContext)?;
-
-		let surface = skia_surface_for_current_fbo(&mut gr, req.gl, req.width, req.height)?;
+		let target_fbo = current_framebuffer_binding(req.gl);
 
 		Ok(Self {
-			gr,
-			surface,
+			surfaces_by_fbo: HashMap::new(),
 			width: req.width,
 			height: req.height,
+			target_fbo,
 			gl: req.gl.clone(),
 			id: MonitorId::rand(),
 		})
 	}
 
-	#[tracing::instrument(skip_all, fields(width = width, height = height))]
-	fn ensure_surface_size(&mut self, width: usize, height: usize) -> Result<(), RenderError> {
-		if self.width == width && self.height == height {
-			return Ok(());
+	#[tracing::instrument(skip_all, fields(width = width, height = height, fbo = fbo))]
+	fn ensure_surface_target(
+		&mut self,
+		gr: &mut gpu::DirectContext,
+		width: usize,
+		height: usize,
+		fbo: i32,
+	) -> Result<(), RenderError> {
+		let size_changed = self.width != width || self.height != height;
+		if size_changed {
+			self.surfaces_by_fbo.clear();
+			self.width = width;
+			self.height = height;
 		}
-		self.width = width;
-		self.height = height;
-		self.surface = skia_surface_for_current_fbo(&mut self.gr, &self.gl, width, height)?;
+		self.target_fbo = fbo;
+		if !self.surfaces_by_fbo.contains_key(&fbo) {
+			self
+				.surfaces_by_fbo
+				.insert(fbo, skia_surface_for_fbo(gr, width, height, fbo)?);
+		}
 		Ok(())
 	}
 
 	pub fn canvas(&mut self) -> &skia::Canvas {
-		self.surface.canvas()
+		self
+			.surfaces_by_fbo
+			.get_mut(&self.target_fbo)
+			.expect("active target fbo surface missing")
+			.canvas()
 	}
 
-	pub fn flush(&mut self) {
-		self.gr.flush(None);
+	pub fn flush(&mut self, gr: &mut gpu::DirectContext) {
+		gr.flush(None);
 	}
 
 	pub fn get_server_layer_monitor(monitor: &Monitor<Self>) -> ServerLayerMonitor {
@@ -114,8 +134,12 @@ impl MonitorRenderState {
 	}
 
 	#[tracing::instrument(skip_all, fields(monitor_id = %self.id))]
-	fn draw_texture(&mut self, texture: &mut SkiaDmaBufTexture) -> Result<(), RenderError> {
-		let Some(image) = texture.image(&mut self.gr) else {
+	fn draw_texture(
+		&mut self,
+		gr: &mut gpu::DirectContext,
+		texture: &mut SkiaDmaBufTexture,
+	) -> Result<(), RenderError> {
+		let Some(image) = texture.image(gr) else {
 			return Err(RenderError::SkiaSurface);
 		};
 		let rect = skia::Rect::from_wh(self.width as f32, self.height as f32);
@@ -127,7 +151,6 @@ impl MonitorRenderState {
 			.draw_image_rect_with_sampling_options(image, None, rect, sampling, &paint);
 		Ok(())
 	}
-
 }
 
 #[derive(Default, Debug)]
@@ -162,7 +185,7 @@ enum BufferSlot {
 #[derive(Debug)]
 enum FenceEvent {
 	Signaled { key: SlotKey },
-	Failed { key: SlotKey, reason: Arc<str> },
+	// Failed { key: SlotKey, reason: Arc<str> },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -170,7 +193,6 @@ struct DeferredRelease {
 	monitor_id: MonitorId,
 	session_id: SessionId,
 	buffer: BufferSlot,
-	target_flip: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -213,6 +235,7 @@ impl From<BufferSlot> for BufferIndex {
 
 pub struct RenderingLayer {
 	drm: EasyDRM<MonitorRenderState>,
+	gr: gpu::DirectContext,
 	command_rx: Option<RenderCmdRx>,
 	event_tx: RenderEvtTx,
 	known_monitors: HashMap<MonitorId, ServerLayerMonitor>,
@@ -221,10 +244,14 @@ pub struct RenderingLayer {
 	slot_ownership: HashMap<SlotKey, SlotOwner>,
 	fence_event_tx: mpsc::UnboundedSender<FenceEvent>,
 	fence_event_rx: mpsc::UnboundedReceiver<FenceEvent>,
-	fence_waiters: HashMap<SlotKey, JoinHandle<()>>,
-	flip_counters: HashMap<MonitorId, u64>,
+	fence_scheduler: FenceScheduler,
+	fence_tasks: HashMap<SlotKey, FenceTaskHandle>,
 	deferred_releases: Vec<DeferredRelease>,
 	current_session: Option<SessionId>,
+	#[cfg(debug_assertions)]
+	fd_guard_limit: usize,
+	#[cfg(debug_assertions)]
+	fd_guard_last_check: Instant,
 }
 
 impl RenderingLayer {
@@ -235,10 +262,15 @@ impl RenderingLayer {
 			// O EasyDRM chama isto com o contexto do monitor já válido/current.
 			MonitorRenderState::new(req).expect("MonitorRenderState::new failed")
 		})?;
+		drm.make_current().map_err(|_| RenderError::SkiaGlInterface)?;
+		let interface =
+			gpu::gl::Interface::new_load_with(|s| drm.get_proc_address(s)).ok_or(RenderError::SkiaGlInterface)?;
+		let gr = gpu::direct_contexts::make_gl(interface, None).ok_or(RenderError::SkiaDirectContext)?;
 		let (fence_event_tx, fence_event_rx) = mpsc::unbounded_channel();
 
 		Ok(Self {
 			drm,
+			gr,
 			command_rx: Some(command_rx),
 			event_tx,
 			known_monitors: HashMap::new(),
@@ -247,10 +279,17 @@ impl RenderingLayer {
 			slot_ownership: HashMap::new(),
 			fence_event_tx,
 			fence_event_rx,
-			fence_waiters: HashMap::new(),
-			flip_counters: HashMap::new(),
+			fence_scheduler: FenceScheduler::new(),
+			fence_tasks: HashMap::new(),
 			deferred_releases: Vec::new(),
 			current_session: None,
+			#[cfg(debug_assertions)]
+			fd_guard_limit: std::env::var("SHIFT_MAX_OPEN_FDS")
+				.ok()
+				.and_then(|v| v.parse::<usize>().ok())
+				.unwrap_or(4096),
+			#[cfg(debug_assertions)]
+			fd_guard_last_check: Instant::now(),
 		})
 	}
 
@@ -269,6 +308,8 @@ impl RenderingLayer {
 		self.known_monitors = current.into_iter().map(|m| (m.id, m)).collect();
 
 		'e: loop {
+			#[cfg(debug_assertions)]
+			self.check_open_fd_guard()?;
 			// Mantém as surfaces a seguir ao tamanho real do monitor
 			let monitor_ids: Vec<MonitorId> = self.drm.monitors().map(|mon| mon.context().id).collect();
 			let current_session = self.current_session;
@@ -277,43 +318,54 @@ impl RenderingLayer {
 					self.monitor_state.entry((*id, s)).or_default();
 				}
 			}
-			for mon in self.drm.monitors_mut() {
-				if mon.can_render() && mon.make_current().is_ok() {
-					unsafe { mon.gl().ClearColor(1.0, 0.0, 0.0, 1.0); }
-					unsafe{mon.gl().Clear(COLOR_BUFFER_BIT | DEPTH_BUFFER_BIT); };
+				for mon in self.drm.monitors_mut() {
+					if !mon.can_render() {
+					continue;
+				}
+				if let Err(e) = mon.make_current() {
+					warn!(monitor_id = %mon.context().id, "make_current failed: {e:?}");
+					continue;
+				}
+				{
+					unsafe {
+						mon.gl().ClearColor(1.0, 0.0, 0.0, 1.0);
+					}
+					unsafe {
+						mon.gl().Clear(COLOR_BUFFER_BIT | DEPTH_BUFFER_BIT);
+					};
 
 					let monitor_id = mon.context().id;
 					let mode = mon.active_mode();
 					let (w, h) = (mode.size().0 as usize, mode.size().1 as usize);
-					let context = mon.context_mut();
-					context.ensure_surface_size(w, h)?;
+						let context = mon.context_mut();
+						let target_fbo = current_framebuffer_binding(&context.gl);
+						context.ensure_surface_target(&mut self.gr, w, h, target_fbo)?;
 
-					let key = current_session
-						.and_then(|session_id| {
-							let state = self
-								.monitor_state
-								.entry((monitor_id, session_id))
-								.or_default();
-							state
-								.current_buffer
-								.map(|buffer| SlotKey::new(monitor_id, session_id, buffer))
-						});
+					let key = current_session.and_then(|session_id| {
+						let state = self
+							.monitor_state
+							.entry((monitor_id, session_id))
+							.or_default();
+						state
+							.current_buffer
+							.map(|buffer| SlotKey::new(monitor_id, session_id, buffer))
+					});
 					let texture = key.and_then(|key| {
 						if self.slot_ownership.get(&key).copied() != Some(SlotOwner::Shift) {
 							return None;
 						}
 						self.slots.get_mut(&key)
 					});
-					if let Some(texture) = texture {
-						if let Err(e) = context.draw_texture(texture) {
-							warn!(%monitor_id, "failed to draw client texture: {e:?}");
+						if let Some(texture) = texture {
+							if let Err(e) = context.draw_texture(&mut self.gr, texture) {
+								warn!(%monitor_id, "failed to draw client texture: {e:?}");
+							}
 						}
-					}
 
-					context.flush();
+						context.flush(&mut self.gr);
+					}
 				}
-			}
-			{
+			let committed_any = {
 				let page_flip_span = tracing::span!(tracing::Level::TRACE, "drm_page_flip_ioctl");
 				let _page_flip_enter = page_flip_span.enter();
 
@@ -323,9 +375,10 @@ impl RenderingLayer {
 					.filter(|m| m.was_drawn())
 					.map(|m| m.context().id)
 					.collect::<Vec<_>>();
-				self.drm.swap_buffers()?;
+				let swap_result = self.drm.swap_buffers_with_result()?;
+				let committed_any = !swap_result.committed_connectors.is_empty();
 				self
-					.process_deferred_releases(&page_flipped_monitors)
+					.process_deferred_releases(swap_result.render_fence)
 					.await;
 
 				self
@@ -333,10 +386,11 @@ impl RenderingLayer {
 						monitors: page_flipped_monitors,
 					})
 					.await;
-			}
-			'l: loop {
-				tokio::select! {
-					cmd = command_rx.recv() => {
+				committed_any
+			};
+				'l: loop {
+					tokio::select! {
+						cmd = command_rx.recv() => {
 						if let Some(cmd) = cmd {
 							if !self.handle_command(cmd).await? {
 								break 'e;
@@ -356,10 +410,46 @@ impl RenderingLayer {
 							self.handle_fence_event(fence_evt).await;
 						}
 					}
+						scheduler_ok = self.fence_scheduler.recv_and_run() => {
+							if !scheduler_ok {
+								warn!("fence scheduler channel closed");
+							}
+						}
+						_ = tokio::time::sleep(Duration::from_millis(2)), if !committed_any => {
+							// No commit happened this iteration, so there may be no pageflip event to wake us up.
+							// Avoid stalling forever waiting on drm events that won't arrive.
+							break 'l;
+						}
+					}
 				}
 			}
-		};
 		warn!("shutting down renderer");
+		Ok(())
+	}
+
+	#[cfg(debug_assertions)]
+	fn check_open_fd_guard(&mut self) -> Result<(), RenderError> {
+		const FD_GUARD_INTERVAL: Duration = Duration::from_secs(1);
+		if self.fd_guard_last_check.elapsed() < FD_GUARD_INTERVAL {
+			return Ok(());
+		}
+		self.fd_guard_last_check = Instant::now();
+
+		let Ok(entries) = fs::read_dir("/proc/self/fd") else {
+			return Ok(());
+		};
+		let count = entries.count();
+		if count > self.fd_guard_limit {
+			debug_assert!(
+				count <= self.fd_guard_limit,
+				"open fd guard exceeded: {count} > {}",
+				self.fd_guard_limit
+			);
+			return Err(RenderError::OpenFdGuardExceeded {
+				count,
+				limit: self.fd_guard_limit,
+			});
+		}
 		Ok(())
 	}
 	pub fn drm(&self) -> &EasyDRM<MonitorRenderState> {
@@ -420,41 +510,42 @@ impl RenderingLayer {
 
 	fn cleanup_monitor_slots(&mut self, monitor_id: MonitorId) {
 		self.slots.retain(|key, _| key.monitor_id != monitor_id);
-		self.slot_ownership.retain(|key, _| key.monitor_id != monitor_id);
-		self.flip_counters.remove(&monitor_id);
+		self
+			.slot_ownership
+			.retain(|key, _| key.monitor_id != monitor_id);
 		self
 			.deferred_releases
 			.retain(|item| item.monitor_id != monitor_id);
 		let remove = self
-			.fence_waiters
+			.fence_tasks
 			.keys()
 			.filter(|key| key.monitor_id == monitor_id)
 			.copied()
 			.collect::<Vec<_>>();
 		for key in remove {
-			if let Some(waiter) = self.fence_waiters.remove(&key) {
-				waiter.abort();
-			}
+			self.cancel_fence_wait(key);
 		}
 	}
 
 	fn cleanup_session_slots(&mut self, session_id: SessionId) {
 		self.slots.retain(|key, _| key.session_id != session_id);
-		self.slot_ownership.retain(|key, _| key.session_id != session_id);
-		self.monitor_state.retain(|(_, sess), _| *sess != session_id);
+		self
+			.slot_ownership
+			.retain(|key, _| key.session_id != session_id);
+		self
+			.monitor_state
+			.retain(|(_, sess), _| *sess != session_id);
 		self
 			.deferred_releases
 			.retain(|item| item.session_id != session_id);
 		let remove = self
-			.fence_waiters
+			.fence_tasks
 			.keys()
 			.filter(|key| key.session_id == session_id)
 			.copied()
 			.collect::<Vec<_>>();
 		for key in remove {
-			if let Some(waiter) = self.fence_waiters.remove(&key) {
-				waiter.abort();
-			}
+			self.cancel_fence_wait(key);
 		}
 	}
 
@@ -472,6 +563,7 @@ impl RenderingLayer {
 
 		let mut imported = Vec::new();
 		let mut found_monitor = false;
+		let egl_context = self.drm.egl_context();
 		for mon in self.drm.monitors_mut() {
 			if mon.context().id != monitor_id {
 				continue;
@@ -482,7 +574,12 @@ impl RenderingLayer {
 				break;
 			}
 			let gl = mon.context().gl.clone();
-			let proc_loader = |symbol: &str| mon.get_proc_address(symbol);
+			let proc_loader = |symbol: &str| {
+				egl_context
+					.lock()
+					.map(|ctx| ctx.get_proc_address(symbol))
+					.unwrap_or(std::ptr::null())
+			};
 			for (idx, fd) in dma_bufs.into_iter().enumerate() {
 				let Some(slot) = BufferSlot::from_index(idx) else {
 					continue;
@@ -528,16 +625,8 @@ impl RenderingLayer {
 		session_id: SessionId,
 		buffer: BufferSlot,
 	) {
-		let target_flip = self
-			.flip_counters
-			.get(&monitor_id)
-			.copied()
-			.unwrap_or(0)
-			.saturating_add(1);
 		if self.deferred_releases.iter().any(|item| {
-			item.monitor_id == monitor_id
-				&& item.session_id == session_id
-				&& item.buffer == buffer
+			item.monitor_id == monitor_id && item.session_id == session_id && item.buffer == buffer
 		}) {
 			return;
 		}
@@ -545,38 +634,23 @@ impl RenderingLayer {
 			monitor_id,
 			session_id,
 			buffer,
-			target_flip,
 		});
 	}
 
-	async fn process_deferred_releases(&mut self, flipped_monitors: &[MonitorId]) {
-		for monitor_id in flipped_monitors {
-			let next = self
-				.flip_counters
-				.get(monitor_id)
-				.copied()
-				.unwrap_or(0)
-				.saturating_add(1);
-			self.flip_counters.insert(*monitor_id, next);
-		}
-		let mut ready = Vec::new();
-		self.deferred_releases.retain(|item| {
-			let flips = self
-				.flip_counters
-				.get(&item.monitor_id)
-				.copied()
-				.unwrap_or(0);
-			if flips >= item.target_flip {
-				ready.push(*item);
-				false
-			} else {
-				true
-			}
-		});
-		for item in ready {
+	async fn process_deferred_releases(&mut self, release_fence: i32) {
+		for item in self.deferred_releases.drain(..).collect::<Vec<_>>() {
 			let key = SlotKey::new(item.monitor_id, item.session_id, item.buffer);
 			self.slot_ownership.insert(key, SlotOwner::Client);
-			let release_fence = self.create_release_fence_for_monitor(item.monitor_id);
+			let release_fence = if release_fence >= 0 {
+				let dup_fd = unsafe { libc::dup(release_fence) };
+				if dup_fd >= 0 {
+					Some(unsafe { OwnedFd::from_raw_fd(dup_fd) })
+				} else {
+					None
+				}
+			} else {
+				None
+			};
 			self
 				.emit_event(RenderEvt::BufferConsumed {
 					session_id: item.session_id,
@@ -586,36 +660,6 @@ impl RenderingLayer {
 				})
 				.await;
 		}
-	}
-
-	fn create_release_fence_for_monitor(&mut self, monitor_id: MonitorId) -> Option<OwnedFd> {
-		let mon = self
-			.drm
-			.monitors_mut()
-			.find(|m| m.context().id == monitor_id)?;
-		if let Err(e) = mon.make_current() {
-			warn!(%monitor_id, "failed to make monitor current for release fence: {e:?}");
-			return None;
-		}
-		let (fence_fd, sync) = match mon.create_egl_fence() {
-			Ok(v) => v,
-			Err(e) => {
-				warn!(%monitor_id, "failed to create egl release fence: {e}");
-				return None;
-			}
-		};
-		if !sync.is_null() {
-			let egl = egl::Egl::load_with(|s| mon.get_proc_address(s));
-			if egl.DestroySync.is_loaded() {
-				unsafe {
-					egl.DestroySync(egl.GetCurrentDisplay(), sync.cast());
-				}
-			}
-		}
-		if fence_fd < 0 {
-			return None;
-		}
-		Some(unsafe { OwnedFd::from_raw_fd(fence_fd) })
 	}
 }
 
@@ -670,12 +714,19 @@ impl RenderingLayer {
 						.await;
 				} else {
 					let has_acquire_fence = acquire_fence.is_some();
+					if let Some(state) = self.monitor_state.get(&(monitor_id, session_id))
+						&& let Some(pending) = state.pending_buffer
+					{
+						let pending_key = SlotKey::new(monitor_id, session_id, pending);
+						if pending_key != slot_key {
+							self.cancel_fence_wait(pending_key);
+							self.queue_buffer_release(monitor_id, session_id, pending);
+						}
+					}
 					if let Some(fence_fd) = acquire_fence {
 						self.spawn_acquire_fence_waiter(slot_key, fence_fd);
 					} else {
-						if let Some(waiter) = self.fence_waiters.remove(&slot_key) {
-							waiter.abort();
-						}
+						self.cancel_fence_wait(slot_key);
 					}
 					let state = self
 						.monitor_state
@@ -712,91 +763,43 @@ impl RenderingLayer {
 		}
 	}
 
+	fn cancel_fence_wait(&mut self, key: SlotKey) {
+		if let Some(handle) = self.fence_tasks.remove(&key) {
+			self.fence_scheduler.cancel(handle);
+		}
+	}
+
 	fn spawn_acquire_fence_waiter(&mut self, key: SlotKey, fence_fd: OwnedFd) {
-		if let Some(prev) = self.fence_waiters.remove(&key) {
-			prev.abort();
+		if let Some(existing) = self.fence_tasks.get(&key).copied() {
+			if let Ok(cloned_fd) = fence_fd.as_fd().try_clone_to_owned()
+				&& self
+					.fence_scheduler
+					.reschedule(existing, vec![cloned_fd], FenceWaitMode::All)
+			{
+				return;
+			}
+			// Recover from unexpected scheduler/task-map desync.
+			self.fence_tasks.remove(&key);
 		}
 		let tx = self.fence_event_tx.clone();
-		let handle = tokio::spawn(async move {
-			let afd = match AsyncFd::new(fence_fd) {
-				Ok(afd) => afd,
-				Err(e) => {
-					let _ = tx.send(FenceEvent::Failed {
-						key,
-						reason: format!("failed to register fence fd: {e}").into(),
-					});
-					return;
-				}
-			};
-			loop {
-				let mut guard = match afd.readable().await {
-					Ok(guard) => guard,
-					Err(e) => {
-						let _ = tx.send(FenceEvent::Failed {
-							key,
-							reason: format!("fence wait failed: {e}").into(),
-						});
-						return;
-					}
-				};
-				match guard.try_io(|inner| {
-					let fd = inner.as_raw_fd();
-					let mut poll_fd = nix::libc::pollfd {
-						fd,
-						events: (nix::libc::POLLIN | nix::libc::POLLERR | nix::libc::POLLHUP) as i16,
-						revents: 0,
-					};
-					let result = unsafe { nix::libc::poll(&mut poll_fd as *mut nix::libc::pollfd, 1, 0) };
-					if result > 0
-						&& (poll_fd.revents
-							& (nix::libc::POLLIN | nix::libc::POLLERR | nix::libc::POLLHUP) as i16)
-							!= 0
-					{
-						Ok(())
-					} else {
-						Err(std::io::Error::new(
-							ErrorKind::WouldBlock,
-							"fence not signaled yet",
-						))
-					}
-				}) {
-					Ok(Ok(())) => {
-						let _ = tx.send(FenceEvent::Signaled { key });
-						return;
-					}
-					Ok(Err(e)) => {
-						let _ = tx.send(FenceEvent::Failed {
-							key,
-							reason: format!("fence poll failed: {e}").into(),
-						});
-						return;
-					}
-					Err(_would_block) => continue,
-				}
-			}
-		});
-		self.fence_waiters.insert(key, handle);
+		let handle = self.fence_scheduler.schedule(
+			vec![fence_fd],
+			FenceWaitMode::All,
+			Box::new(move || {
+				let _ = tx.send(FenceEvent::Signaled { key });
+			}),
+		);
+		self.fence_tasks.insert(key, handle);
 	}
 
 	async fn handle_fence_event(&mut self, event: FenceEvent) {
 		match event {
 			FenceEvent::Signaled { key } => {
-				self.fence_waiters.remove(&key);
-				if let Some(state) = self.monitor_state.get_mut(&(key.monitor_id, key.session_id)) {
-					if state.pending_buffer == Some(key.buffer) {
-						let previous = state.current_buffer;
-						state.current_buffer = Some(key.buffer);
-						state.pending_buffer = None;
-						if let Some(previous) = previous.filter(|prev| *prev != key.buffer) {
-							self.queue_buffer_release(key.monitor_id, key.session_id, previous);
-						}
-					}
-				}
-			}
-			FenceEvent::Failed { key, reason } => {
-				self.fence_waiters.remove(&key);
-				warn!(%key.monitor_id, %key.session_id, buffer = ?key.buffer, %reason, "fence waiter failed, promoting pending buffer");
-				if let Some(state) = self.monitor_state.get_mut(&(key.monitor_id, key.session_id)) {
+				self.fence_tasks.remove(&key);
+				if let Some(state) = self
+					.monitor_state
+					.get_mut(&(key.monitor_id, key.session_id))
+				{
 					if state.pending_buffer == Some(key.buffer) {
 						let previous = state.current_buffer;
 						state.current_buffer = Some(key.buffer);
@@ -815,17 +818,12 @@ impl RenderingLayer {
 // Skia surface helper
 // -----------------------------
 
-fn skia_surface_for_current_fbo(
+fn skia_surface_for_fbo(
 	gr: &mut gpu::DirectContext,
-	gl: &gl::Gles2,
 	width: usize,
 	height: usize,
+	fbo: i32,
 ) -> Result<skia::Surface, RenderError> {
-	let mut fbo: i32 = 0;
-	unsafe {
-		gl.GetIntegerv(gl::FRAMEBUFFER_BINDING, &mut fbo);
-	}
-
 	let fb_info = FramebufferInfo {
 		fboid: fbo as u32,
 		format: gpu::gl::Format::RGBA8.into(),
@@ -842,10 +840,18 @@ fn skia_surface_for_current_fbo(
 	gpu::surfaces::wrap_backend_render_target(
 		gr,
 		&backend_rt,
-		gpu::SurfaceOrigin::BottomLeft,
+		gpu::SurfaceOrigin::TopLeft,
 		skia::ColorType::RGBA8888,
 		None,
 		None,
 	)
 	.ok_or(RenderError::SkiaSurface)
+}
+
+fn current_framebuffer_binding(gl: &gl::Gles2) -> i32 {
+	let mut fbo: i32 = 0;
+	unsafe {
+		gl.GetIntegerv(gl::FRAMEBUFFER_BINDING, &mut fbo);
+	}
+	fbo
 }

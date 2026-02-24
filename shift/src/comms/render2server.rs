@@ -1,9 +1,12 @@
-use std::sync::Arc;
 use std::os::fd::OwnedFd;
+use std::sync::Arc;
 
 use tab_protocol::BufferIndex;
 
-use crate::{monitor::{Monitor, MonitorId}, sessions::SessionId};
+use crate::{
+	monitor::{Monitor, MonitorId},
+	sessions::SessionId,
+};
 
 /// Events emitted by the rendering layer back into the server core.
 #[derive(Debug)]

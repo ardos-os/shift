@@ -1,17 +1,22 @@
 #![allow(non_camel_case_types)]
 
 use std::{
+	cell::RefCell,
 	collections::{HashMap, VecDeque},
 	env,
 	ffi::{CStr, CString},
 	os::raw::{c_char, c_int},
 	ptr,
-	sync::{Arc, Mutex},
+	rc::Rc,
 };
 
 use crate::{
-	config::TabClientConfig, error::TabClientError, events::{MonitorEvent, RenderEvent},
-	monitor::MonitorState, swapchain::TabSwapchain, TabClient,
+	TabClient,
+	config::TabClientConfig,
+	error::TabClientError,
+	events::{MonitorEvent, RenderEvent},
+	monitor::MonitorState,
+	swapchain::TabSwapchain,
 };
 use tab_protocol::BufferIndex;
 
@@ -441,7 +446,7 @@ enum PendingEvent {
 
 pub struct TabClientHandle {
 	client: TabClient,
-	events: Arc<Mutex<VecDeque<PendingEvent>>>,
+	events: Rc<RefCell<VecDeque<PendingEvent>>>,
 	monitors: HashMap<String, MonitorEntry>,
 	monitor_order: Vec<String>,
 	last_error: Option<CString>,
@@ -449,12 +454,12 @@ pub struct TabClientHandle {
 
 impl TabClientHandle {
 	fn new(mut client: TabClient) -> Result<Self, TabClientError> {
-		let queue = Arc::new(Mutex::new(VecDeque::new()));
+		let queue = Rc::new(RefCell::new(VecDeque::new()));
 
 		{
 			let q = queue.clone();
 			client.on_monitor_event(move |evt| {
-				let mut guard = q.lock().unwrap();
+				let mut guard = q.borrow_mut();
 				match evt {
 					MonitorEvent::Added(state) => guard.push_back(PendingEvent::MonitorAdded(state.clone())),
 					MonitorEvent::Removed(id) => guard.push_back(PendingEvent::MonitorRemoved(id.clone())),
@@ -464,7 +469,7 @@ impl TabClientHandle {
 		{
 			let q = queue.clone();
 			client.on_render_event(move |evt| {
-				let mut guard = q.lock().unwrap();
+				let mut guard = q.borrow_mut();
 				match evt {
 					RenderEvent::BufferReleased {
 						monitor_id,
@@ -487,7 +492,11 @@ impl TabClientHandle {
 			last_error: None,
 		};
 
-		let monitor_ids: Vec<String> = handle.client.monitors().map(|m| m.info.id.clone()).collect();
+		let monitor_ids: Vec<String> = handle
+			.client
+			.monitors()
+			.map(|m| m.info.id.clone())
+			.collect();
 		for id in monitor_ids {
 			if let Some(state) = handle.client.monitor(&id).cloned() {
 				handle.insert_monitor(state)?;
@@ -528,7 +537,9 @@ impl TabClientHandle {
 }
 
 fn dup_string(s: &str) -> *mut c_char {
-	CString::new(s).map(|c| c.into_raw()).unwrap_or(ptr::null_mut())
+	CString::new(s)
+		.map(|c| c.into_raw())
+		.unwrap_or(ptr::null_mut())
 }
 
 fn cstring_to_string(ptr: *const c_char) -> Option<String> {
@@ -624,12 +635,7 @@ pub unsafe extern "C" fn tab_client_take_error(handle: *mut TabClientHandle) -> 
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tab_client_get_socket_fd(handle: *mut TabClientHandle) -> c_int {
-	unsafe {
-		handle
-			.as_ref()
-			.map(|h| h.client.socket_fd())
-			.unwrap_or(-1)
-	}
+	unsafe { handle.as_ref().map(|h| h.client.socket_fd()).unwrap_or(-1) }
 }
 
 #[unsafe(no_mangle)]
@@ -639,22 +645,12 @@ pub unsafe extern "C" fn tab_client_get_swap_fd(_handle: *mut TabClientHandle) -
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tab_client_drm_fd(handle: *mut TabClientHandle) -> c_int {
-	unsafe {
-		handle
-			.as_ref()
-			.map(|h| h.client.drm_fd())
-			.unwrap_or(-1)
-	}
+	unsafe { handle.as_ref().map(|h| h.client.drm_fd()).unwrap_or(-1) }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tab_client_get_monitor_count(handle: *mut TabClientHandle) -> usize {
-	unsafe {
-		handle
-			.as_ref()
-			.map(|h| h.monitor_order.len())
-			.unwrap_or(0)
-	}
+	unsafe { handle.as_ref().map(|h| h.monitor_order.len()).unwrap_or(0) }
 }
 
 #[unsafe(no_mangle)]
@@ -690,7 +686,7 @@ pub unsafe extern "C" fn tab_client_get_monitor_info(
 					height: 0,
 					refresh_rate: 0,
 					name: ptr::null_mut(),
-				}
+				};
 			}
 		};
 		let id = match cstring_to_string(monitor_id) {
@@ -702,7 +698,7 @@ pub unsafe extern "C" fn tab_client_get_monitor_info(
 					height: 0,
 					refresh_rate: 0,
 					name: ptr::null_mut(),
-				}
+				};
 			}
 		};
 		match handle.monitors.get(&id) {
@@ -749,7 +745,7 @@ pub unsafe extern "C" fn tab_client_poll_events(handle: *mut TabClientHandle) ->
 				return 0;
 			}
 		}
-		handle.events.lock().unwrap().len()
+		handle.events.borrow().len()
 	}
 }
 
@@ -766,7 +762,7 @@ pub unsafe extern "C" fn tab_client_next_event(
 		if event.is_null() {
 			return false;
 		}
-		let pending = handle.events.lock().unwrap().pop_front();
+		let pending = handle.events.borrow_mut().pop_front();
 		let Some(evt) = pending else {
 			return false;
 		};
@@ -793,7 +789,10 @@ pub unsafe extern "C" fn tab_client_next_event(
 				if let Err(err) = handle.insert_monitor(state.clone()) {
 					handle.record_error(err);
 					// requeue and signal failure
-					handle.events.lock().unwrap().push_front(PendingEvent::MonitorAdded(state));
+					handle
+						.events
+						.borrow_mut()
+						.push_front(PendingEvent::MonitorAdded(state));
 					false
 				} else {
 					(*event).event_type = TabEventType::TAB_EVENT_MONITOR_ADDED;
@@ -923,7 +922,9 @@ pub unsafe extern "C" fn tab_client_get_server_name(_handle: *mut TabClientHandl
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn tab_client_get_protocol_name(_handle: *mut TabClientHandle) -> *mut c_char {
+pub unsafe extern "C" fn tab_client_get_protocol_name(
+	_handle: *mut TabClientHandle,
+) -> *mut c_char {
 	ptr::null_mut()
 }
 

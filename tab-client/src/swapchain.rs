@@ -8,12 +8,16 @@ use tab_protocol::{BufferIndex, FramebufferLinkPayload};
 pub struct TabBuffer {
 	pub index: BufferIndex,
 	bo: BufferObject<()>,
-	fd: OwnedFd
+	fd: OwnedFd,
 }
 
 impl TabBuffer {
 	pub fn new(index: BufferIndex, bo: BufferObject<()>) -> Self {
-		Self { index, fd: bo.fd().unwrap(), bo }
+		Self {
+			index,
+			fd: bo.fd().unwrap(),
+			bo,
+		}
 	}
 
 	pub fn width(&self) -> i32 {

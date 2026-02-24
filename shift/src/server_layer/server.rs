@@ -1,4 +1,13 @@
-use std::{collections::{HashMap, HashSet}, fs::Permissions, future::pending, io, os::unix::fs::PermissionsExt, path::{Path, PathBuf}, process::Command, sync::Arc};
+use std::{
+	collections::{HashMap, HashSet},
+	fs::Permissions,
+	future::pending,
+	io,
+	os::unix::fs::PermissionsExt,
+	path::{Path, PathBuf},
+	process::Command,
+	sync::Arc,
+};
 
 use futures::future::select_all;
 use tab_protocol::TabMessageFrame;
@@ -112,8 +121,7 @@ impl ShiftServer {
 		self.pending_sessions.insert(token.clone(), session);
 
 		let admin_launch_cmd = std::env::var("ADMIN_LAUNCH_CMD").ok();
-		let shell = std::env::var("SHELL")
-			.unwrap_or_else(|_| "bash".to_string());
+		let shell = std::env::var("SHELL").unwrap_or_else(|_| "bash".to_string());
 		if let Some(admin_launch_cmd) = admin_launch_cmd {
 			let mut cmd = Command::new(shell);
 			cmd.args(["-c", &admin_launch_cmd]);
@@ -369,18 +377,21 @@ impl ShiftServer {
 					let Ok(monitor_id) = monitor_id_raw.parse::<MonitorId>() else {
 						return;
 					};
-					self.waiting_flip
-						.retain(|pending| !(pending.session_id == session_id && pending.monitor_id == monitor_id));
+					self.waiting_flip.retain(|pending| {
+						!(pending.session_id == session_id && pending.monitor_id == monitor_id)
+					});
 					self.pending_buffer_requests.retain(|pending| {
 						!(pending.session_id == session_id && pending.monitor_id == monitor_id)
 					});
 					self.front_buffers.remove(&(session_id, monitor_id));
-					self
-						.buffer_ownership
-						.insert((session_id, monitor_id, tab_protocol::BufferIndex::Zero), BufferOwner::Client);
-					self
-						.buffer_ownership
-						.insert((session_id, monitor_id, tab_protocol::BufferIndex::One), BufferOwner::Client);
+					self.buffer_ownership.insert(
+						(session_id, monitor_id, tab_protocol::BufferIndex::Zero),
+						BufferOwner::Client,
+					);
+					self.buffer_ownership.insert(
+						(session_id, monitor_id, tab_protocol::BufferIndex::One),
+						BufferOwner::Client,
+					);
 				}
 			}
 		}
@@ -400,7 +411,9 @@ impl ShiftServer {
 				if let Some(monitor) = self.monitors.remove(&monitor_id) {
 					self.broadcast_monitor_removed(&monitor).await;
 				}
-				self.waiting_flip.retain(|pending| pending.monitor_id != monitor_id);
+				self
+					.waiting_flip
+					.retain(|pending| pending.monitor_id != monitor_id);
 				self
 					.pending_buffer_requests
 					.retain(|pending| pending.monitor_id != monitor_id);
@@ -460,11 +473,7 @@ impl ShiftServer {
 				if let Some(client) = self.connected_clients.get_mut(&pending.client_id) {
 					client
 						.client_view
-						.notify_error(
-							"buffer_request_rejected".into(),
-							Some(reason),
-							false,
-						)
+						.notify_error("buffer_request_rejected".into(), Some(reason), false)
 						.await;
 				}
 			}
@@ -484,15 +493,15 @@ impl ShiftServer {
 				else {
 					return;
 				};
-				if !client
-					.client_view
-					.notify_buffer_release(vec![BufferRelease {
-						monitor_id,
-						buffer,
-						release_fence,
-					}])
-					.await
-				{
+					if !client
+						.client_view
+						.notify_buffer_release(vec![BufferRelease {
+							monitor_id,
+							buffer,
+							release_fence,
+						}])
+						.await
+					{
 					tracing::warn!(%session_id, %monitor_id, buffer = buffer as u8, "failed to send early buffer_release");
 				} else {
 					self.frame_done_emitted = self.frame_done_emitted.saturating_add(1);
@@ -553,7 +562,8 @@ impl ShiftServer {
 					hellopkt.send_frame_to_async_fd(&client_async_fd).await,
 					"failed to send hello packet: {}"
 				);
-				let (new_client, mut new_client_view) = Client::wrap_socket(client_async_fd, self.monitors.values().cloned().collect());
+				let (new_client, mut new_client_view) =
+					Client::wrap_socket(client_async_fd, self.monitors.values().cloned().collect());
 				let client_id = new_client_view.id();
 
 				self.connected_clients.insert(
@@ -605,8 +615,12 @@ impl ShiftServer {
 			self
 				.pending_buffer_requests
 				.retain(|pending| pending.client_id != client_id && pending.session_id != session_id);
-			self.waiting_flip.retain(|pending| pending.session_id != session_id);
-			self.front_buffers.retain(|(sess, _), _| *sess != session_id);
+			self
+				.waiting_flip
+				.retain(|pending| pending.session_id != session_id);
+			self
+				.front_buffers
+				.retain(|(sess, _), _| *sess != session_id);
 			self
 				.buffer_ownership
 				.retain(|(sess, _, _), _| *sess != session_id);

@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use std::os::fd::OwnedFd;
+use std::sync::Arc;
 
 use tab_protocol::BufferIndex;
 

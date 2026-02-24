@@ -74,7 +74,6 @@ impl DmaBufTexture {
 		}
 		let raw_fd = params.fd.into_raw_fd();
 		let mut attrs = [
-
 			egl::LINUX_DRM_FOURCC_EXT as i32,
 			params.fourcc,
 			egl::DMA_BUF_PLANE0_FD_EXT as i32,
@@ -159,7 +158,7 @@ impl DmaBufTexture {
 			texture_id: texture,
 			width: params.width,
 			height: params.height,
-			fourcc: params.fourcc
+			fourcc: params.fourcc,
 		})
 	}
 	fn skia_tex_info(&self) -> gpu::gl::TextureInfo {
@@ -172,8 +171,6 @@ impl DmaBufTexture {
 	}
 	#[tracing::instrument(skip_all)]
 	pub fn to_skia(self, label: impl AsRef<str>) -> Result<SkiaDmaBufTexture, DmaBufImportError> {
-
-
 		let backend_texture = unsafe {
 			gpu::backend_textures::make_gl(
 				(self.width, self.height),

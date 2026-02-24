@@ -1,12 +1,12 @@
 //! Tab client rewrite crate.
 
+mod c_bindings;
 mod config;
 mod error;
 mod events;
 mod gbm_allocator;
 mod monitor;
 mod swapchain;
-mod c_bindings;
 
 pub use config::TabClientConfig;
 pub use error::TabClientError;
@@ -16,11 +16,10 @@ pub use swapchain::{TabBuffer, TabSwapchain};
 
 use std::collections::HashMap;
 use std::os::{
-	fd::{AsRawFd, AsFd, IntoRawFd, OwnedFd, RawFd},
+	fd::{AsFd, AsRawFd, IntoRawFd, OwnedFd, RawFd},
 	unix::net::UnixStream,
 };
-use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tab_protocol::message_frame::{TabMessageFrame, TabMessageFrameReader};
 use tab_protocol::message_header;
@@ -37,12 +36,14 @@ pub struct TabClient {
 	reader: TabMessageFrameReader,
 	session: SessionInfo,
 	monitors: HashMap<MonitorId, MonitorState>,
-	monitor_listeners: Vec<Arc<dyn Fn(&MonitorEvent) + Send + Sync>>,
-	render_listeners: Vec<Arc<dyn Fn(&RenderEvent) + Send + Sync>>,
+	monitor_listeners: Vec<Box<dyn Fn(&MonitorEvent)>>,
+	render_listeners: Vec<Box<dyn Fn(&RenderEvent)>>,
 	gbm: GbmAllocator,
 }
 
 impl TabClient {
+	const BUFFER_REQUEST_ACK_TIMEOUT: Duration = Duration::from_millis(250);
+
 	pub fn connect(config: TabClientConfig) -> Result<Self, TabClientError> {
 		let socket = tab_protocol::unix_socket_utils::connect_seqpacket(config.socket_path_ref())?;
 		let mut reader = TabMessageFrameReader::new();
@@ -141,16 +142,16 @@ impl TabClient {
 
 	pub fn on_monitor_event<F>(&mut self, listener: F)
 	where
-		F: Fn(&MonitorEvent) + Send + Sync + 'static,
+		F: Fn(&MonitorEvent) + 'static,
 	{
-		self.monitor_listeners.push(Arc::new(listener));
+		self.monitor_listeners.push(Box::new(listener));
 	}
 
 	pub fn on_render_event<F>(&mut self, listener: F)
 	where
-		F: Fn(&RenderEvent) + Send + Sync + 'static,
+		F: Fn(&RenderEvent) + 'static,
 	{
-		self.render_listeners.push(Arc::new(listener));
+		self.render_listeners.push(Box::new(listener));
 	}
 
 	pub fn dispatch_events(&mut self) -> Result<(), TabClientError> {
@@ -258,7 +259,11 @@ impl TabClient {
 		monitor_id: &str,
 		buffer: BufferIndex,
 	) -> Result<(), TabClientError> {
+		let deadline = Instant::now() + Self::BUFFER_REQUEST_ACK_TIMEOUT;
 		loop {
+			if Instant::now() >= deadline {
+				return Err(TabClientError::Unexpected("buffer_request_ack timeout"));
+			}
 			match self.reader.read_framed(&self.socket) {
 				Ok(frame) => {
 					let message = TabMessage::try_from(frame)?;

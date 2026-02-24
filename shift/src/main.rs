@@ -18,10 +18,14 @@ mod sessions;
 #[tokio::main]
 async fn main() {
 	// ---- logging/tracing ----
-	let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("trace"));
+	let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 	Registry::default()
-		.with(env_filter)
-		.with(tracing_subscriber::fmt::layer().with_target(false).with_ansi(false))
+	.with(env_filter)
+		// .with(
+		// 	tracing_subscriber::fmt::layer()
+		// 		.with_target(false)
+		// 		.with_ansi(false),
+		// )
 		// .with(tracing_tracy::TracyLayer::new(tracing_tracy::DefaultConfig::default()))
 		.init();
 
@@ -29,7 +33,6 @@ async fn main() {
 	let socket_path = std::env::var_os("SHIFT_SOCKET")
 		.map(PathBuf::from)
 		.unwrap_or_else(|| "/tmp/shift.sock".into());
-
 
 	// ---- create inter-layer channels ----
 	let render_channels = RenderChannels::new();

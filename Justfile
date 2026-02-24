@@ -19,7 +19,7 @@ run: build-with-debug-symbols
         echo "❌ Erro: \$HYPRLAND_BIN não definida no .env"
         exit 1
     fi
-    export ADMIN_LAUNCH_CMD="sleep 0.5s && $HYPRLAND_BIN"
+    export ADMIN_LAUNCH_CMD="sleep 2s && TRACY_PORT=1234 $HYPRLAND_BIN"
     cargo run --bin shift --profile release-with-debug
 
 

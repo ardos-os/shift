@@ -15,6 +15,8 @@ fn main() {
 		Fallbacks::All,
 		&[
 			"EGL_KHR_image_base",
+			"EGL_KHR_fence_sync",
+			"EGL_KHR_reusable_sync",
 			"EGL_EXT_image_dma_buf_import",
 			"EGL_EXT_image_dma_buf_import_modifiers",
 			"EGL_MESA_image_dma_buf_export",
