@@ -7,7 +7,8 @@ use std::{
 use tab_protocol::{
 	AuthErrorPayload, AuthOkPayload, ErrorPayload, MonitorAddedPayload, MonitorRemovedPayload,
 	SessionActivePayload, SessionAwakePayload, SessionCreatedPayload, SessionInfo,
-	SessionSleepPayload, TabMessage, TabMessageFrame, TabMessageFrameReader, message_header,
+	SessionSleepPayload, SessionStatePayload, TabMessage, TabMessageFrame, TabMessageFrameReader,
+	message_header,
 };
 use tokio::{io::unix::AsyncFd, task::JoinHandle};
 use tracing::{Instrument, Span};
@@ -231,7 +232,7 @@ impl Client {
 				self.handle_unknown_msg("SessionCreated").await
 			}
 			TabMessage::SessionReady(_session_ready_payload) => {
-				self.handle_unknown_msg("SessionReady").await
+				send_server_msg!(C2SMsg::SessionReady(_session_ready_payload));
 			}
 			TabMessage::SessionState(_session_state_payload) => {
 				self.handle_unknown_msg("SessionState").await
@@ -373,6 +374,15 @@ impl Client {
 					.await
 				{
 					tracing::warn!("failed to send session active: {e}");
+				}
+			}
+			S2CMsg::SessionState { session } => {
+				let payload = SessionStatePayload { session };
+				if let Err(e) = TabMessageFrame::json(message_header::SESSION_STATE, payload)
+					.send_frame_to_async_fd(&self.socket)
+					.await
+				{
+					tracing::warn!("failed to send session state: {e}");
 				}
 			}
 			S2CMsg::SessionSleep { session_id } => {

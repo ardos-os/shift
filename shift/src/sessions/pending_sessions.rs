@@ -48,7 +48,7 @@ impl PendingSession {
 		Session {
 			id: self.id,
 			role: self.role,
-			ready: false,
+			ready: self.role == Role::Admin,
 			display_name: self
 				.display_name
 				.as_ref()

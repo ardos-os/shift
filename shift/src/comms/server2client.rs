@@ -1,7 +1,7 @@
 use std::os::fd::OwnedFd;
 use std::sync::Arc;
 
-use tab_protocol::BufferIndex;
+use tab_protocol::{BufferIndex, SessionInfo};
 
 use crate::{
 	auth::{self, Token},
@@ -35,6 +35,9 @@ pub enum S2CMsg {
 	},
 	SessionActive {
 		session_id: SessionId,
+	},
+	SessionState {
+		session: SessionInfo,
 	},
 	SessionAwake {
 		session_id: SessionId,

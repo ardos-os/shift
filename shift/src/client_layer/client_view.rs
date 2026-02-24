@@ -10,6 +10,7 @@ use crate::{
 	monitor::{Monitor, MonitorId},
 	sessions::{PendingSession, Session, SessionId},
 };
+use tab_protocol::SessionInfo;
 
 #[derive(Debug)]
 pub struct ChannelsServerEnd(C2SRx, S2CTx);
@@ -178,6 +179,15 @@ impl ClientView {
 			.channels
 			.1
 			.send(S2CMsg::SessionActive { session_id })
+			.await
+			.is_ok()
+	}
+
+	pub async fn notify_session_state(&mut self, session: SessionInfo) -> bool {
+		self
+			.channels
+			.1
+			.send(S2CMsg::SessionState { session })
 			.await
 			.is_ok()
 	}

@@ -26,7 +26,7 @@ use tab_protocol::message_header;
 use tab_protocol::{
 	AuthErrorPayload, AuthOkPayload, AuthPayload, BufferIndex, BufferReleasePayload,
 	BufferRequestAckPayload, MonitorInfo, SessionActivePayload, SessionAwakePayload, SessionInfo,
-	SessionSleepPayload, TabMessage,
+	SessionReadyPayload, SessionSleepPayload, SessionStatePayload, TabMessage,
 };
 
 use crate::gbm_allocator::GbmAllocator;
@@ -143,6 +143,14 @@ impl TabClient {
 		Ok(())
 	}
 
+	pub fn send_ready(&self) -> Result<(), TabClientError> {
+		let payload = SessionReadyPayload {
+			session_id: self.session.id.clone(),
+		};
+		TabMessageFrame::json(message_header::SESSION_READY, payload).encode_and_send(&self.socket)?;
+		Ok(())
+	}
+
 	pub fn on_monitor_event<F>(&mut self, listener: F)
 	where
 		F: Fn(&MonitorEvent) + 'static,
@@ -230,6 +238,9 @@ impl TabClient {
 			TabMessage::SessionActive(SessionActivePayload { session_id }) => {
 				self.handle_session_active(session_id);
 			}
+			TabMessage::SessionState(SessionStatePayload { session }) => {
+				self.handle_session_state(session);
+			}
 			_ => {}
 		}
 		Ok(())
@@ -289,6 +300,13 @@ impl TabClient {
 
 	fn handle_session_sleep(&mut self, session_id: String) {
 		let event = SessionEvent::Sleep(session_id);
+		for listener in &self.session_listeners {
+			listener(&event);
+		}
+	}
+
+	fn handle_session_state(&mut self, session: SessionInfo) {
+		let event = SessionEvent::State(session);
 		for listener in &self.session_listeners {
 			listener(&event);
 		}

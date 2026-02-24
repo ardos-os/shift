@@ -38,6 +38,7 @@ use crate::{
 	rendering_layer::channels::ServerEnd as RenderServerChannels,
 	sessions::{PendingSession, Role, Session, SessionId},
 };
+use tab_protocol::{SessionInfo, SessionLifecycle, SessionRole};
 
 #[derive(Debug, Clone, Copy)]
 struct PendingFlip {
@@ -73,6 +74,7 @@ pub struct ShiftServer {
 	current_session: Option<SessionId>,
 	pending_sessions: HashMap<Token, PendingSession>,
 	active_sessions: HashMap<SessionId, Arc<Session>>,
+	loading_sessions: HashSet<SessionId>,
 	awake_sessions: HashSet<SessionId>,
 	awake_until: HashMap<SessionId, Instant>,
 	connected_clients: HashMap<ClientId, ConnectedClient>,
@@ -128,6 +130,7 @@ impl ShiftServer {
 			current_session: Default::default(),
 			pending_sessions: Default::default(),
 			active_sessions: Default::default(),
+			loading_sessions: Default::default(),
 			awake_sessions: Default::default(),
 			awake_until: Default::default(),
 			connected_clients: Default::default(),
@@ -272,6 +275,9 @@ impl ShiftServer {
 		for session_id in sessions {
 			self.awake_sessions.insert(session_id);
 		}
+		for session_id in &self.loading_sessions {
+			self.awake_sessions.insert(*session_id);
+		}
 		for (session_id, deadline) in &self.awake_until {
 			if *deadline > now {
 				self.awake_sessions.insert(*session_id);
@@ -313,6 +319,43 @@ impl ShiftServer {
 	async fn is_session_awake(&mut self, session_id: SessionId) -> bool {
 		self.prune_expired_awake_sessions().await;
 		self.awake_sessions.contains(&session_id)
+	}
+
+	fn session_info_from(session: &Session) -> SessionInfo {
+		SessionInfo {
+			id: session.id().to_string(),
+			role: match session.role() {
+				Role::Admin => SessionRole::Admin,
+				Role::Normal => SessionRole::Session,
+			},
+			display_name: Some(session.display_name().to_string()),
+			state: if session.ready() {
+				SessionLifecycle::Occupied
+			} else {
+				SessionLifecycle::Loading
+			},
+		}
+	}
+
+	async fn notify_admins_session_state(&mut self, session: &Session) {
+		let info = Self::session_info_from(session);
+		let admin_client_ids = self
+			.connected_clients
+			.iter()
+			.filter_map(|(id, client)| {
+				let session_id = client.client_view.authenticated_session()?;
+				let session = self.active_sessions.get(&session_id)?;
+				(session.role() == Role::Admin).then_some(*id)
+			})
+			.collect::<Vec<_>>();
+		for id in admin_client_ids {
+			let Some(client) = self.connected_clients.get_mut(&id) else {
+				continue;
+			};
+			if !client.client_view.notify_session_state(info.clone()).await {
+				tracing::warn!(%id, session_id = %session.id(), "failed to notify session state");
+			}
+		}
 	}
 
 	#[tracing::instrument(level= "info", skip(self), fields(connected_clients=self.connected_clients.len(), active_sessions=self.active_sessions.len(), pending_sessions = self.pending_sessions.len(), current_session = ?self.current_session))]
@@ -419,6 +462,12 @@ impl ShiftServer {
 				self
 					.active_sessions
 					.insert(session.id(), Arc::clone(&session));
+				if session.role() == Role::Normal && !session.ready() {
+					self.loading_sessions.insert(session.id());
+					self
+						.set_awake_sessions(self.current_session.into_iter())
+						.await;
+				}
 				if session.role() == Role::Admin {
 					self.debug_admin_session_id.get_or_insert(session.id());
 					self.maybe_spawn_debug_second_session(session.id());
@@ -439,6 +488,22 @@ impl ShiftServer {
 							.notify_session_active(active_session_id)
 							.await;
 					}
+				}
+				if session.role() == Role::Admin {
+					let session_infos = self
+						.active_sessions
+						.values()
+						.filter(|s| s.role() == Role::Normal)
+						.map(|s| Self::session_info_from(s))
+						.collect::<Vec<_>>();
+					if let Some(client) = self.connected_clients.get_mut(&client_id) {
+						for info in session_infos {
+							client.client_view.notify_session_state(info).await;
+						}
+					}
+				}
+				if session.role() == Role::Normal {
+					self.notify_admins_session_state(&session).await;
 				}
 			}
 			C2SMsg::CreateSession(req) => {
@@ -547,6 +612,24 @@ impl ShiftServer {
 					}
 					return;
 				}
+				if let Some(target) = self.active_sessions.get(&target_session)
+					&& target.role() != Role::Admin
+					&& !target.ready()
+				{
+					if let Some(client) = self.connected_clients.get_mut(&client_id) {
+						client
+							.client_view
+							.notify_error(
+								"session_loading".into(),
+								Some(Arc::<str>::from(
+									"target session is still loading and cannot become active",
+								)),
+								false,
+							)
+							.await;
+					}
+					return;
+				}
 				let previous = self.current_session;
 				let transition = match (previous, payload.animation.clone()) {
 					(Some(from_session_id), Some(animation))
@@ -565,6 +648,74 @@ impl ShiftServer {
 				};
 				self
 					.update_active_session(Some(target_session), transition)
+					.await;
+			}
+			C2SMsg::SessionReady(payload) => {
+				let Some(connected_client) = self.connected_clients.get(&client_id) else {
+					tracing::warn!("tried handling message from a non-existing client");
+					return;
+				};
+				let requester_session_id = connected_client.client_view.authenticated_session();
+				let Some(requester_session_id) = requester_session_id else {
+					if let Some(client) = self.connected_clients.get_mut(&client_id) {
+						client
+							.client_view
+							.notify_error("forbidden".into(), None, false)
+							.await;
+					}
+					return;
+				};
+				if payload.session_id != requester_session_id.to_string() {
+					if let Some(client) = self.connected_clients.get_mut(&client_id) {
+						client
+							.client_view
+							.notify_error(
+								"invalid_session_id".into(),
+								Some(Arc::<str>::from(
+									"session_ready session_id does not match authenticated session",
+								)),
+								false,
+							)
+							.await;
+					}
+					return;
+				}
+				let Some(existing) = self.active_sessions.get(&requester_session_id).cloned() else {
+					if let Some(client) = self.connected_clients.get_mut(&client_id) {
+						client
+							.client_view
+							.notify_error("forbidden".into(), None, false)
+							.await;
+					}
+					return;
+				};
+				if existing.role() == Role::Admin {
+					if let Some(client) = self.connected_clients.get_mut(&client_id) {
+						client
+							.client_view
+							.notify_error(
+								"invalid_transition".into(),
+								Some(Arc::<str>::from(
+									"admin session does not use loading/ready lifecycle",
+								)),
+								false,
+							)
+							.await;
+					}
+					return;
+				}
+				if existing.ready() {
+					return;
+				}
+
+				let ready_session = Arc::new(existing.with_ready(true));
+				self
+					.active_sessions
+					.insert(requester_session_id, Arc::clone(&ready_session));
+				self.loading_sessions.remove(&requester_session_id);
+				self.notify_admins_session_state(&ready_session).await;
+				self
+					.set_awake_sessions(self.current_session.into_iter())
 					.await;
 			}
 			C2SMsg::BufferRequest {
@@ -932,6 +1083,7 @@ impl ShiftServer {
 		};
 		if let Some(session_id) = client.client_view.authenticated_session() {
 			self.active_sessions.remove(&session_id);
+			self.loading_sessions.remove(&session_id);
 			self.awake_sessions.remove(&session_id);
 			self.awake_until.remove(&session_id);
 			self

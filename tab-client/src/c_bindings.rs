@@ -448,6 +448,7 @@ enum PendingEvent {
 	BufferReleased(String, BufferIndex, Option<c_int>),
 	MonitorAdded(MonitorState),
 	MonitorRemoved(String),
+	SessionState(tab_protocol::SessionInfo),
 	SessionActive(String),
 	SessionAwake(String),
 	SessionSleep(String),
@@ -505,6 +506,9 @@ impl TabClientHandle {
 					}
 					SessionEvent::Sleep(session_id) => {
 						guard.push_back(PendingEvent::SessionSleep(session_id.clone()))
+					}
+					SessionEvent::State(session) => {
+						guard.push_back(PendingEvent::SessionState(session.clone()))
 					}
 				}
 			});
@@ -589,6 +593,35 @@ fn monitor_info_to_c(state: &MonitorState) -> TabMonitorInfo {
 		height: state.info.height,
 		refresh_rate: state.info.refresh_rate,
 		name: dup_string(&state.info.name),
+	}
+}
+
+fn tab_session_role(role: tab_protocol::SessionRole) -> TabSessionRole {
+	match role {
+		tab_protocol::SessionRole::Admin => TabSessionRole::TAB_SESSION_ROLE_ADMIN,
+		tab_protocol::SessionRole::Session => TabSessionRole::TAB_SESSION_ROLE_SESSION,
+	}
+}
+
+fn tab_session_lifecycle(lifecycle: tab_protocol::SessionLifecycle) -> TabSessionLifecycle {
+	match lifecycle {
+		tab_protocol::SessionLifecycle::Pending => TabSessionLifecycle::TAB_SESSION_LIFECYCLE_PENDING,
+		tab_protocol::SessionLifecycle::Loading => TabSessionLifecycle::TAB_SESSION_LIFECYCLE_LOADING,
+		tab_protocol::SessionLifecycle::Occupied => TabSessionLifecycle::TAB_SESSION_LIFECYCLE_OCCUPIED,
+		tab_protocol::SessionLifecycle::Consumed => TabSessionLifecycle::TAB_SESSION_LIFECYCLE_CONSUMED,
+	}
+}
+
+fn tab_session_info_to_c(session: &tab_protocol::SessionInfo) -> TabSessionInfo {
+	TabSessionInfo {
+		id: dup_string(&session.id),
+		role: tab_session_role(session.role),
+		display_name: session
+			.display_name
+			.as_deref()
+			.map(dup_string)
+			.unwrap_or(ptr::null_mut()),
+		state: tab_session_lifecycle(session.state),
 	}
 }
 
@@ -841,6 +874,11 @@ pub unsafe extern "C" fn tab_client_next_event(
 				(*event).data.session_sleep = dup_string(&session_id);
 				true
 			}
+			PendingEvent::SessionState(session) => {
+				(*event).event_type = TabEventType::TAB_EVENT_SESSION_STATE;
+				(*event).data.session_state = tab_session_info_to_c(&session);
+				true
+			}
 		}
 	}
 }
@@ -884,6 +922,16 @@ pub unsafe extern "C" fn tab_client_free_event_strings(event: *mut TabEvent) {
 				if !(*event).data.session_active.is_null() {
 					drop(CString::from_raw((*event).data.session_active));
 					(*event).data.session_active = ptr::null_mut();
+				}
+			}
+			TabEventType::TAB_EVENT_SESSION_STATE => {
+				if !(*event).data.session_state.id.is_null() {
+					drop(CString::from_raw((*event).data.session_state.id));
+					(*event).data.session_state.id = ptr::null_mut();
+				}
+				if !(*event).data.session_state.display_name.is_null() {
+					drop(CString::from_raw((*event).data.session_state.display_name));
+					(*event).data.session_state.display_name = ptr::null_mut();
 				}
 			}
 			TabEventType::TAB_EVENT_MONITOR_ADDED => {
@@ -988,12 +1036,17 @@ pub unsafe extern "C" fn tab_client_get_protocol_name(
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn tab_client_get_session(_handle: *mut TabClientHandle) -> TabSessionInfo {
-	TabSessionInfo {
-		id: ptr::null_mut(),
-		role: TabSessionRole::TAB_SESSION_ROLE_SESSION,
-		display_name: ptr::null_mut(),
-		state: TabSessionLifecycle::TAB_SESSION_LIFECYCLE_PENDING,
+pub unsafe extern "C" fn tab_client_get_session(handle: *mut TabClientHandle) -> TabSessionInfo {
+	unsafe {
+		let Some(handle) = handle.as_ref() else {
+			return TabSessionInfo {
+				id: ptr::null_mut(),
+				role: TabSessionRole::TAB_SESSION_ROLE_SESSION,
+				display_name: ptr::null_mut(),
+				state: TabSessionLifecycle::TAB_SESSION_LIFECYCLE_PENDING,
+			};
+		};
+		tab_session_info_to_c(handle.client.session())
 	}
 }
 
@@ -1015,6 +1068,15 @@ pub unsafe extern "C" fn tab_client_free_session_info(info: *mut TabSessionInfo)
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn tab_client_send_ready(_handle: *mut TabClientHandle) -> bool {
-	false
+pub unsafe extern "C" fn tab_client_send_ready(handle: *mut TabClientHandle) -> bool {
+	unsafe {
+		let Some(handle) = handle.as_mut() else {
+			return false;
+		};
+		if let Err(err) = handle.client.send_ready() {
+			handle.record_error(err);
+			return false;
+		}
+		true
+	}
 }

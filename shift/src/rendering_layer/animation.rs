@@ -82,7 +82,7 @@ impl Animation for BlurBlendAnimation {
 
 		if phase == 0 {
 			// Blur the old frame out.
-			draw_blurred_image(canvas, old_image, width, height, 24.0 * local_t, 1.0);
+			draw_blurred_image(canvas, old_image, width, height, 60.0 * local_t, 1.0);
 		} else {
 			// Bring in the new frame blurred, then sharpen it.
 			draw_blurred_image(
@@ -90,7 +90,7 @@ impl Animation for BlurBlendAnimation {
 				new_image,
 				width,
 				height,
-				24.0 * (1.0 - local_t),
+				60.0 * (1.0 - local_t),
 				1.0,
 			);
 		}

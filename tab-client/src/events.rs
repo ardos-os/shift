@@ -1,6 +1,6 @@
 use crate::MonitorState;
 use std::os::fd::RawFd;
-use tab_protocol::BufferIndex;
+use tab_protocol::{BufferIndex, SessionInfo};
 
 /// Monitor lifecycle event emitted to listeners.
 #[derive(Debug, Clone)]
@@ -24,4 +24,5 @@ pub enum SessionEvent {
 	Active(String),
 	Awake(String),
 	Sleep(String),
+	State(SessionInfo),
 }
