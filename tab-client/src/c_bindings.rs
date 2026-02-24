@@ -1,18 +1,22 @@
 #![allow(non_camel_case_types)]
 
 use std::{
+	cell::RefCell,
 	collections::{HashMap, VecDeque},
 	env,
 	ffi::{CStr, CString},
-	os::fd::IntoRawFd,
 	os::raw::{c_char, c_int},
 	ptr,
-	sync::{Arc, Mutex},
+	rc::Rc,
 };
 
 use crate::{
-	config::TabClientConfig, error::TabClientError, events::{MonitorEvent, RenderEvent},
-	monitor::MonitorState, swapchain::TabSwapchain, TabClient,
+	TabClient,
+	config::TabClientConfig,
+	error::TabClientError,
+	events::{MonitorEvent, RenderEvent, SessionEvent},
+	monitor::MonitorState,
+	swapchain::TabSwapchain,
 };
 use tab_protocol::BufferIndex;
 
@@ -32,7 +36,16 @@ pub struct TabFrameTarget {
 	pub texture: u32,
 	pub width: i32,
 	pub height: i32,
+	pub buffer_index: u32,
 	pub dmabuf: TabDmabuf,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct TabBufferRelease {
+	pub monitor_id: *mut c_char,
+	pub buffer_index: u32,
+	pub release_fence_fd: c_int,
 }
 
 #[repr(C)]
@@ -56,12 +69,15 @@ pub enum TabAcquireResult {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub enum TabEventType {
-	TAB_EVENT_FRAME_DONE = 0,
+	TAB_EVENT_BUFFER_RELEASED = 0,
 	TAB_EVENT_MONITOR_ADDED = 1,
 	TAB_EVENT_MONITOR_REMOVED = 2,
 	TAB_EVENT_SESSION_STATE = 3,
 	TAB_EVENT_INPUT = 4,
 	TAB_EVENT_SESSION_CREATED = 5,
+	TAB_EVENT_SESSION_AWAKE = 6,
+	TAB_EVENT_SESSION_SLEEP = 7,
+	TAB_EVENT_SESSION_ACTIVE = 8,
 }
 
 #[repr(C)]
@@ -99,10 +115,13 @@ pub struct TabEvent {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub union TabEventData {
-	pub frame_done: *mut c_char,
+	pub buffer_released: TabBufferRelease,
 	pub monitor_added: TabMonitorInfo,
 	pub monitor_removed: *mut c_char,
 	pub session_state: TabSessionInfo,
+	pub session_awake: *mut c_char,
+	pub session_sleep: *mut c_char,
+	pub session_active: *mut c_char,
 	pub input: TabInputEvent,
 	pub session_created_token: *mut c_char,
 }
@@ -426,14 +445,18 @@ struct MonitorEntry {
 }
 
 enum PendingEvent {
-	FrameDone(String),
+	BufferReleased(String, BufferIndex, Option<c_int>),
 	MonitorAdded(MonitorState),
 	MonitorRemoved(String),
+	SessionState(tab_protocol::SessionInfo),
+	SessionActive(String),
+	SessionAwake(String),
+	SessionSleep(String),
 }
 
 pub struct TabClientHandle {
 	client: TabClient,
-	events: Arc<Mutex<VecDeque<PendingEvent>>>,
+	events: Rc<RefCell<VecDeque<PendingEvent>>>,
 	monitors: HashMap<String, MonitorEntry>,
 	monitor_order: Vec<String>,
 	last_error: Option<CString>,
@@ -441,12 +464,12 @@ pub struct TabClientHandle {
 
 impl TabClientHandle {
 	fn new(mut client: TabClient) -> Result<Self, TabClientError> {
-		let queue = Arc::new(Mutex::new(VecDeque::new()));
+		let queue = Rc::new(RefCell::new(VecDeque::new()));
 
 		{
 			let q = queue.clone();
 			client.on_monitor_event(move |evt| {
-				let mut guard = q.lock().unwrap();
+				let mut guard = q.borrow_mut();
 				match evt {
 					MonitorEvent::Added(state) => guard.push_back(PendingEvent::MonitorAdded(state.clone())),
 					MonitorEvent::Removed(id) => guard.push_back(PendingEvent::MonitorRemoved(id.clone())),
@@ -456,9 +479,37 @@ impl TabClientHandle {
 		{
 			let q = queue.clone();
 			client.on_render_event(move |evt| {
-				let mut guard = q.lock().unwrap();
+				let mut guard = q.borrow_mut();
 				match evt {
-					RenderEvent::FrameDone { monitor_id } => guard.push_back(PendingEvent::FrameDone(monitor_id.clone())),
+					RenderEvent::BufferReleased {
+						monitor_id,
+						buffer,
+						release_fence_fd,
+					} => guard.push_back(PendingEvent::BufferReleased(
+						monitor_id.clone(),
+						*buffer,
+						*release_fence_fd,
+					)),
+				}
+			});
+		}
+		{
+			let q = queue.clone();
+			client.on_session_event(move |evt| {
+				let mut guard = q.borrow_mut();
+				match evt {
+					SessionEvent::Active(session_id) => {
+						guard.push_back(PendingEvent::SessionActive(session_id.clone()))
+					}
+					SessionEvent::Awake(session_id) => {
+						guard.push_back(PendingEvent::SessionAwake(session_id.clone()))
+					}
+					SessionEvent::Sleep(session_id) => {
+						guard.push_back(PendingEvent::SessionSleep(session_id.clone()))
+					}
+					SessionEvent::State(session) => {
+						guard.push_back(PendingEvent::SessionState(session.clone()))
+					}
 				}
 			});
 		}
@@ -471,7 +522,11 @@ impl TabClientHandle {
 			last_error: None,
 		};
 
-		let monitor_ids: Vec<String> = handle.client.monitors().map(|m| m.info.id.clone()).collect();
+		let monitor_ids: Vec<String> = handle
+			.client
+			.monitors()
+			.map(|m| m.info.id.clone())
+			.collect();
 		for id in monitor_ids {
 			if let Some(state) = handle.client.monitor(&id).cloned() {
 				handle.insert_monitor(state)?;
@@ -512,7 +567,9 @@ impl TabClientHandle {
 }
 
 fn dup_string(s: &str) -> *mut c_char {
-	CString::new(s).map(|c| c.into_raw()).unwrap_or(ptr::null_mut())
+	CString::new(s)
+		.map(|c| c.into_raw())
+		.unwrap_or(ptr::null_mut())
 }
 
 fn cstring_to_string(ptr: *const c_char) -> Option<String> {
@@ -536,6 +593,35 @@ fn monitor_info_to_c(state: &MonitorState) -> TabMonitorInfo {
 		height: state.info.height,
 		refresh_rate: state.info.refresh_rate,
 		name: dup_string(&state.info.name),
+	}
+}
+
+fn tab_session_role(role: tab_protocol::SessionRole) -> TabSessionRole {
+	match role {
+		tab_protocol::SessionRole::Admin => TabSessionRole::TAB_SESSION_ROLE_ADMIN,
+		tab_protocol::SessionRole::Session => TabSessionRole::TAB_SESSION_ROLE_SESSION,
+	}
+}
+
+fn tab_session_lifecycle(lifecycle: tab_protocol::SessionLifecycle) -> TabSessionLifecycle {
+	match lifecycle {
+		tab_protocol::SessionLifecycle::Pending => TabSessionLifecycle::TAB_SESSION_LIFECYCLE_PENDING,
+		tab_protocol::SessionLifecycle::Loading => TabSessionLifecycle::TAB_SESSION_LIFECYCLE_LOADING,
+		tab_protocol::SessionLifecycle::Occupied => TabSessionLifecycle::TAB_SESSION_LIFECYCLE_OCCUPIED,
+		tab_protocol::SessionLifecycle::Consumed => TabSessionLifecycle::TAB_SESSION_LIFECYCLE_CONSUMED,
+	}
+}
+
+fn tab_session_info_to_c(session: &tab_protocol::SessionInfo) -> TabSessionInfo {
+	TabSessionInfo {
+		id: dup_string(&session.id),
+		role: tab_session_role(session.role),
+		display_name: session
+			.display_name
+			.as_deref()
+			.map(dup_string)
+			.unwrap_or(ptr::null_mut()),
+		state: tab_session_lifecycle(session.state),
 	}
 }
 
@@ -608,12 +694,7 @@ pub unsafe extern "C" fn tab_client_take_error(handle: *mut TabClientHandle) -> 
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tab_client_get_socket_fd(handle: *mut TabClientHandle) -> c_int {
-	unsafe {
-		handle
-			.as_ref()
-			.map(|h| h.client.socket_fd())
-			.unwrap_or(-1)
-	}
+	unsafe { handle.as_ref().map(|h| h.client.socket_fd()).unwrap_or(-1) }
 }
 
 #[unsafe(no_mangle)]
@@ -623,22 +704,12 @@ pub unsafe extern "C" fn tab_client_get_swap_fd(_handle: *mut TabClientHandle) -
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tab_client_drm_fd(handle: *mut TabClientHandle) -> c_int {
-	unsafe {
-		handle
-			.as_ref()
-			.map(|h| h.client.drm_fd())
-			.unwrap_or(-1)
-	}
+	unsafe { handle.as_ref().map(|h| h.client.drm_fd()).unwrap_or(-1) }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tab_client_get_monitor_count(handle: *mut TabClientHandle) -> usize {
-	unsafe {
-		handle
-			.as_ref()
-			.map(|h| h.monitor_order.len())
-			.unwrap_or(0)
-	}
+	unsafe { handle.as_ref().map(|h| h.monitor_order.len()).unwrap_or(0) }
 }
 
 #[unsafe(no_mangle)]
@@ -674,7 +745,7 @@ pub unsafe extern "C" fn tab_client_get_monitor_info(
 					height: 0,
 					refresh_rate: 0,
 					name: ptr::null_mut(),
-				}
+				};
 			}
 		};
 		let id = match cstring_to_string(monitor_id) {
@@ -686,7 +757,7 @@ pub unsafe extern "C" fn tab_client_get_monitor_info(
 					height: 0,
 					refresh_rate: 0,
 					name: ptr::null_mut(),
-				}
+				};
 			}
 		};
 		match handle.monitors.get(&id) {
@@ -733,7 +804,7 @@ pub unsafe extern "C" fn tab_client_poll_events(handle: *mut TabClientHandle) ->
 				return 0;
 			}
 		}
-		handle.events.lock().unwrap().len()
+		handle.events.borrow().len()
 	}
 }
 
@@ -750,14 +821,21 @@ pub unsafe extern "C" fn tab_client_next_event(
 		if event.is_null() {
 			return false;
 		}
-		let pending = handle.events.lock().unwrap().pop_front();
+		let pending = handle.events.borrow_mut().pop_front();
 		let Some(evt) = pending else {
 			return false;
 		};
 		match evt {
-			PendingEvent::FrameDone(monitor_id) => {
-				(*event).event_type = TabEventType::TAB_EVENT_FRAME_DONE;
-				(*event).data.frame_done = dup_string(&monitor_id);
+			PendingEvent::BufferReleased(monitor_id, buffer, release_fence_fd) => {
+				if let Some(entry) = handle.monitors.get_mut(&monitor_id) {
+					entry.swapchain.mark_released(buffer);
+				}
+				(*event).event_type = TabEventType::TAB_EVENT_BUFFER_RELEASED;
+				(*event).data.buffer_released = TabBufferRelease {
+					monitor_id: dup_string(&monitor_id),
+					buffer_index: buffer as u32,
+					release_fence_fd: release_fence_fd.unwrap_or(-1),
+				};
 				true
 			}
 			PendingEvent::MonitorRemoved(monitor_id) => {
@@ -770,13 +848,36 @@ pub unsafe extern "C" fn tab_client_next_event(
 				if let Err(err) = handle.insert_monitor(state.clone()) {
 					handle.record_error(err);
 					// requeue and signal failure
-					handle.events.lock().unwrap().push_front(PendingEvent::MonitorAdded(state));
+					handle
+						.events
+						.borrow_mut()
+						.push_front(PendingEvent::MonitorAdded(state));
 					false
 				} else {
 					(*event).event_type = TabEventType::TAB_EVENT_MONITOR_ADDED;
 					(*event).data.monitor_added = monitor_info_to_c(&state);
 					true
 				}
+			}
+			PendingEvent::SessionAwake(session_id) => {
+				(*event).event_type = TabEventType::TAB_EVENT_SESSION_AWAKE;
+				(*event).data.session_awake = dup_string(&session_id);
+				true
+			}
+			PendingEvent::SessionActive(session_id) => {
+				(*event).event_type = TabEventType::TAB_EVENT_SESSION_ACTIVE;
+				(*event).data.session_active = dup_string(&session_id);
+				true
+			}
+			PendingEvent::SessionSleep(session_id) => {
+				(*event).event_type = TabEventType::TAB_EVENT_SESSION_SLEEP;
+				(*event).data.session_sleep = dup_string(&session_id);
+				true
+			}
+			PendingEvent::SessionState(session) => {
+				(*event).event_type = TabEventType::TAB_EVENT_SESSION_STATE;
+				(*event).data.session_state = tab_session_info_to_c(&session);
+				true
 			}
 		}
 	}
@@ -789,16 +890,48 @@ pub unsafe extern "C" fn tab_client_free_event_strings(event: *mut TabEvent) {
 			return;
 		}
 		match (*event).event_type {
-			TabEventType::TAB_EVENT_FRAME_DONE => {
-				if !(*event).data.frame_done.is_null() {
-					drop(CString::from_raw((*event).data.frame_done));
-					(*event).data.frame_done = ptr::null_mut();
+			TabEventType::TAB_EVENT_BUFFER_RELEASED => {
+				if !(*event).data.buffer_released.monitor_id.is_null() {
+					drop(CString::from_raw((*event).data.buffer_released.monitor_id));
+					(*event).data.buffer_released.monitor_id = ptr::null_mut();
+				}
+				if (*event).data.buffer_released.release_fence_fd >= 0 {
+					libc::close((*event).data.buffer_released.release_fence_fd);
+					(*event).data.buffer_released.release_fence_fd = -1;
 				}
 			}
 			TabEventType::TAB_EVENT_MONITOR_REMOVED => {
 				if !(*event).data.monitor_removed.is_null() {
 					drop(CString::from_raw((*event).data.monitor_removed));
 					(*event).data.monitor_removed = ptr::null_mut();
+				}
+			}
+			TabEventType::TAB_EVENT_SESSION_AWAKE => {
+				if !(*event).data.session_awake.is_null() {
+					drop(CString::from_raw((*event).data.session_awake));
+					(*event).data.session_awake = ptr::null_mut();
+				}
+			}
+			TabEventType::TAB_EVENT_SESSION_SLEEP => {
+				if !(*event).data.session_sleep.is_null() {
+					drop(CString::from_raw((*event).data.session_sleep));
+					(*event).data.session_sleep = ptr::null_mut();
+				}
+			}
+			TabEventType::TAB_EVENT_SESSION_ACTIVE => {
+				if !(*event).data.session_active.is_null() {
+					drop(CString::from_raw((*event).data.session_active));
+					(*event).data.session_active = ptr::null_mut();
+				}
+			}
+			TabEventType::TAB_EVENT_SESSION_STATE => {
+				if !(*event).data.session_state.id.is_null() {
+					drop(CString::from_raw((*event).data.session_state.id));
+					(*event).data.session_state.id = ptr::null_mut();
+				}
+				if !(*event).data.session_state.display_name.is_null() {
+					drop(CString::from_raw((*event).data.session_state.display_name));
+					(*event).data.session_state.display_name = ptr::null_mut();
 				}
 			}
 			TabEventType::TAB_EVENT_MONITOR_ADDED => {
@@ -829,14 +962,10 @@ pub unsafe extern "C" fn tab_client_acquire_frame(
 			Some(entry) => entry,
 			None => return TabAcquireResult::TAB_ACQUIRE_ERROR,
 		};
-		let (buffer, index) = entry.swapchain.acquire_next();
-		let fd = match buffer.duplicate_fd() {
-			Ok(fd) => fd.into_raw_fd(),
-			Err(err) => {
-				handle.record_error(err);
-				return TabAcquireResult::TAB_ACQUIRE_ERROR;
-			}
+		let Some((buffer, index)) = entry.swapchain.acquire_next() else {
+			return TabAcquireResult::TAB_ACQUIRE_NO_BUFFERS;
 		};
+		let fd = buffer.fd();
 		entry.pending = Some(index);
 		if target.is_null() {
 			return TabAcquireResult::TAB_ACQUIRE_ERROR;
@@ -845,6 +974,7 @@ pub unsafe extern "C" fn tab_client_acquire_frame(
 		(*target).texture = 0;
 		(*target).width = buffer.width();
 		(*target).height = buffer.height();
+		(*target).buffer_index = index as u32;
 		(*target).dmabuf = TabDmabuf {
 			fd,
 			stride: buffer.stride(),
@@ -856,9 +986,10 @@ pub unsafe extern "C" fn tab_client_acquire_frame(
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn tab_client_swap_buffers(
+pub unsafe extern "C" fn tab_client_request_buffer(
 	handle: *mut TabClientHandle,
 	monitor_id: *const c_char,
+	acquire_fence_fd: c_int,
 ) -> bool {
 	unsafe {
 		let handle = match handle.as_mut() {
@@ -877,10 +1008,17 @@ pub unsafe extern "C" fn tab_client_swap_buffers(
 			Some(idx) => idx,
 			None => return false,
 		};
-		if let Err(err) = handle.client.swap_buffers(&id, buffer) {
+		let acquire_fence = if acquire_fence_fd >= 0 {
+			Some(acquire_fence_fd)
+		} else {
+			None
+		};
+		if let Err(err) = handle.client.request_buffer(&id, buffer, acquire_fence) {
+			entry.swapchain.rollback();
 			handle.record_error(err);
 			return false;
 		}
+		entry.swapchain.mark_busy(buffer);
 		true
 	}
 }
@@ -891,17 +1029,24 @@ pub unsafe extern "C" fn tab_client_get_server_name(_handle: *mut TabClientHandl
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn tab_client_get_protocol_name(_handle: *mut TabClientHandle) -> *mut c_char {
+pub unsafe extern "C" fn tab_client_get_protocol_name(
+	_handle: *mut TabClientHandle,
+) -> *mut c_char {
 	ptr::null_mut()
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn tab_client_get_session(_handle: *mut TabClientHandle) -> TabSessionInfo {
-	TabSessionInfo {
-		id: ptr::null_mut(),
-		role: TabSessionRole::TAB_SESSION_ROLE_SESSION,
-		display_name: ptr::null_mut(),
-		state: TabSessionLifecycle::TAB_SESSION_LIFECYCLE_PENDING,
+pub unsafe extern "C" fn tab_client_get_session(handle: *mut TabClientHandle) -> TabSessionInfo {
+	unsafe {
+		let Some(handle) = handle.as_ref() else {
+			return TabSessionInfo {
+				id: ptr::null_mut(),
+				role: TabSessionRole::TAB_SESSION_ROLE_SESSION,
+				display_name: ptr::null_mut(),
+				state: TabSessionLifecycle::TAB_SESSION_LIFECYCLE_PENDING,
+			};
+		};
+		tab_session_info_to_c(handle.client.session())
 	}
 }
 
@@ -923,6 +1068,15 @@ pub unsafe extern "C" fn tab_client_free_session_info(info: *mut TabSessionInfo)
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn tab_client_send_ready(_handle: *mut TabClientHandle) -> bool {
-	false
+pub unsafe extern "C" fn tab_client_send_ready(handle: *mut TabClientHandle) -> bool {
+	unsafe {
+		let Some(handle) = handle.as_mut() else {
+			return false;
+		};
+		if let Err(err) = handle.client.send_ready() {
+			handle.record_error(err);
+			return false;
+		}
+		true
+	}
 }

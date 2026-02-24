@@ -33,6 +33,7 @@ impl TabMessageFrameReader {
 	pub fn try_pop_ready_frame(&mut self) -> Option<TabMessageFrame> {
 		self.pop_ready()
 	}
+	#[tracing::instrument(skip_all)]
 	fn feed_chunk(&mut self, bytes: &[u8], mut fds: Vec<RawFd>) -> Result<(), ProtocolError> {
 		if !bytes.is_empty() {
 			self.pending_bytes.extend_from_slice(bytes);
@@ -43,6 +44,7 @@ impl TabMessageFrameReader {
 		self.process_pending()?;
 		Ok(())
 	}
+	#[tracing::instrument(skip_all)]
 	fn process_pending(&mut self) -> Result<(), ProtocolError> {
 		loop {
 			if self.pending_bytes.is_empty() {
@@ -60,6 +62,7 @@ impl TabMessageFrameReader {
 		}
 		Ok(())
 	}
+	#[tracing::instrument(skip_all)]
 	pub fn read_framed(&mut self, stream: &impl AsRawFd) -> Result<TabMessageFrame, ProtocolError> {
 		loop {
 			if let Some(frame) = self.pop_ready() {
@@ -70,6 +73,7 @@ impl TabMessageFrameReader {
 		}
 	}
 	#[cfg(feature = "async")]
+	#[tracing::instrument(skip_all)]
 	pub async fn read_frame_from_async_fd<T: AsRawFd>(
 		&mut self,
 		fd: &tokio::io::unix::AsyncFd<T>,
@@ -88,6 +92,7 @@ impl TabMessageFrameReader {
 		}
 	}
 }
+#[tracing::instrument(skip_all)]
 fn recv_into_vec(stream: &impl AsRawFd) -> Result<(Vec<u8>, Vec<RawFd>), ProtocolError> {
 	let mut buf = [0u8; 4096];
 	let mut cmsg_space = nix::cmsg_space!([RawFd; 8]);
@@ -174,11 +179,14 @@ impl TabMessageFrame {
 		return Ok(packet);
 	}
 
+	#[tracing::instrument(skip_all)]
 	pub(crate) fn expect_payload_json<'a, T>(&'a self) -> Result<T, ProtocolError>
 	where
 		T: serde::Deserialize<'a>,
 	{
 		if let Some(payload) = &self.payload {
+			let span = tracing::span!(tracing::Level::TRACE, "json_decode");
+			let _enter = span.enter();
 			serde_json::from_str(payload.as_str()).map_err(ProtocolError::from)
 		} else {
 			Err(ProtocolError::ExpectedPayload)
@@ -228,6 +236,7 @@ impl TabMessageFrame {
 		}
 	}
 
+	#[tracing::instrument(skip_all, fields(frame_size = bytes.len(), fds = fds.len()))]
 	pub fn parse_from_bytes(
 		bytes: &[u8],
 		fds: Vec<RawFd>,

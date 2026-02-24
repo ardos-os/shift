@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use tracing_subscriber::{EnvFilter, Registry, layer::SubscriberExt, util::SubscriberInitExt};
+
 use crate::{
 	rendering_layer::{RenderingLayer, channels::Channels as RenderChannels},
 	server_layer::ShiftServer,
@@ -16,9 +18,15 @@ mod sessions;
 #[tokio::main]
 async fn main() {
 	// ---- logging/tracing ----
-	tracing_subscriber::fmt()
-		.with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "trace".to_string()))
-		.with_target(false)
+	let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+	Registry::default()
+		.with(env_filter)
+		// .with(
+		// 	tracing_subscriber::fmt::layer()
+		// 		.with_target(false)
+		// 		.with_ansi(false),
+		// )
+		// .with(tracing_tracy::TracyLayer::new(tracing_tracy::DefaultConfig::default()))
 		.init();
 
 	// ---- socket path ----

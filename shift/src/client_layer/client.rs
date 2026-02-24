@@ -1,15 +1,17 @@
 use std::{
 	fmt::{Debug, Display},
-	os::unix::net::UnixStream,
+	os::{fd::AsRawFd, unix::net::UnixStream},
 	sync::Arc,
 };
 
 use tab_protocol::{
-	AuthErrorPayload, AuthOkPayload, ErrorPayload, FrameDonePayload, MonitorAddedPayload,
-	MonitorRemovedPayload, SessionCreatedPayload, SessionInfo, TabMessage, TabMessageFrame,
-	TabMessageFrameReader, message_header,
+	AuthErrorPayload, AuthOkPayload, ErrorPayload, MonitorAddedPayload, MonitorRemovedPayload,
+	SessionActivePayload, SessionAwakePayload, SessionCreatedPayload, SessionInfo,
+	SessionSleepPayload, SessionStatePayload, TabMessage, TabMessageFrame, TabMessageFrameReader,
+	message_header,
 };
 use tokio::{io::unix::AsyncFd, task::JoinHandle};
+use tracing::{Instrument, Span};
 
 use crate::{
 	auth::Token,
@@ -31,11 +33,14 @@ pub struct Client {
 	channel_client_end: ChannelsClientEnd,
 	connected_session: Option<Arc<Session>>,
 	shutdown: bool,
-	initial_monitors: Vec<Monitor>
+	initial_monitors: Vec<Monitor>,
 }
 
 impl Client {
-	pub fn wrap_socket(socket: AsyncUnixStream, initial_monitors: Vec<Monitor>) -> (Self, ClientView) {
+	pub fn wrap_socket(
+		socket: AsyncUnixStream,
+		initial_monitors: Vec<Monitor>,
+	) -> (Self, ClientView) {
 		let channels = client_view::Channels::new();
 		let client = Self {
 			socket,
@@ -44,7 +49,7 @@ impl Client {
 			channel_client_end: channels.client_end,
 			connected_session: None,
 			shutdown: false,
-			initial_monitors
+			initial_monitors,
 		};
 		let client_view = ClientView::from_client(&client, channels.server_end);
 		(client, client_view)
@@ -64,7 +69,10 @@ impl Client {
 		);
 		let result = tab_message.send_frame_to_async_fd(&self.socket).await;
 		if let Err(e) = result {
-			tracing::warn!("failed to send error message to client {:?}: {e}", error.map(|e| e.to_string()));
+			tracing::warn!(
+				"failed to send error message to client {:?}: {e}",
+				error.map(|e| e.to_string())
+			);
 		}
 	}
 	#[tracing::instrument(skip(self), fields(client.id = self.id().to_string()))]
@@ -78,7 +86,10 @@ impl Client {
 
 		let result = tab_message.send_frame_to_async_fd(&self.socket).await;
 		if let Err(e) = result {
-			tracing::warn!("failed to send auth error message to client ({}): {e}", cause.to_string());
+			tracing::warn!(
+				"failed to send auth error message to client ({}): {e}",
+				cause.to_string()
+			);
 		}
 	}
 
@@ -150,10 +161,14 @@ impl Client {
 				tracing::info!(?token, "sending auth request to the server");
 				send_server_msg!(C2SMsg::Auth(token));
 			}
-			TabMessage::SessionSwitch(_session_switch_payload) => {
-				self.handle_unknown_msg("SessionSwitch").await
+			TabMessage::SessionSwitch(session_switch_payload) => {
+				check_admin!("switch session");
+				send_server_msg!(C2SMsg::SwitchSession(session_switch_payload));
 			}
-			TabMessage::SwapBuffers { payload } => {
+			TabMessage::BufferRequest {
+				payload,
+				acquire_fence,
+			} => {
 				let monitor_id = payload.monitor_id.parse::<MonitorId>();
 				let monitor_id = match monitor_id {
 					Ok(monitor_id) => monitor_id,
@@ -166,9 +181,10 @@ impl Client {
 							.await;
 					}
 				};
-				send_server_msg!(C2SMsg::SwapBuffers {
+				send_server_msg!(C2SMsg::BufferRequest {
 					monitor_id: monitor_id,
-					buffer: payload.buffer
+					buffer: payload.buffer,
+					acquire_fence,
 				});
 			}
 			TabMessage::SessionCreate(session_create_req) => {
@@ -201,7 +217,10 @@ impl Client {
 			TabMessage::Hello(_hello_payload) => self.handle_unknown_msg("Hello").await,
 			TabMessage::AuthOk(_auth_ok_payload) => self.handle_unknown_msg("AuthOk").await,
 			TabMessage::AuthError(_auth_error_payload) => self.handle_unknown_msg("AuthError").await,
-			TabMessage::FrameDone(_frame_done_payload) => self.handle_unknown_msg("FrameDone").await,
+			TabMessage::BufferRelease { .. } => self.handle_unknown_msg("BufferRelease").await,
+			TabMessage::BufferRequestAck(_buffer_request_ack_payload) => {
+				self.handle_unknown_msg("BufferRequestAck").await
+			}
 			TabMessage::InputEvent(_input_event_payload) => self.handle_unknown_msg("InputEvent").await,
 			TabMessage::MonitorAdded(_monitor_added_payload) => {
 				self.handle_unknown_msg("MonitorAdded").await
@@ -213,7 +232,7 @@ impl Client {
 				self.handle_unknown_msg("SessionCreated").await
 			}
 			TabMessage::SessionReady(_session_ready_payload) => {
-				self.handle_unknown_msg("SessionReady").await
+				send_server_msg!(C2SMsg::SessionReady(_session_ready_payload));
 			}
 			TabMessage::SessionState(_session_state_payload) => {
 				self.handle_unknown_msg("SessionState").await
@@ -221,6 +240,8 @@ impl Client {
 			TabMessage::SessionActive(_session_active_payload) => {
 				self.handle_unknown_msg("SessionActive").await
 			}
+			TabMessage::SessionAwake(_payload) => self.handle_unknown_msg("SessionAwake").await,
+			TabMessage::SessionSleep(_payload) => self.handle_unknown_msg("SessionSleep").await,
 			TabMessage::Error(_error_payload) => self.handle_unknown_msg("Error").await,
 			TabMessage::Pong => self.handle_unknown_msg("Pong").await,
 			TabMessage::Unknown(tab_message_frame) => {
@@ -250,7 +271,11 @@ impl Client {
 				let auth_ok = TabMessageFrame::json(
 					message_header::AUTH_OK,
 					AuthOkPayload {
-						monitors: self.initial_monitors.iter().map(|m| m.to_protocol_info()).collect(), // TODO: add monitors,
+						monitors: self
+							.initial_monitors
+							.iter()
+							.map(|m| m.to_protocol_info())
+							.collect(), // TODO: add monitors,
 						session: SessionInfo {
 							display_name: Some(session.display_name().to_string()),
 							id: session.id().to_string(),
@@ -306,16 +331,69 @@ impl Client {
 					self.schedule_client_shutdown().await;
 				}
 			}
-			S2CMsg::FrameDone { monitors } => {
-				for monitor_id in monitors {
-					let send_result =
-						TabMessageFrame::raw(message_header::FRAME_DONE, monitor_id.to_string())
-						.send_frame_to_async_fd(&self.socket)
-						.await;
+			S2CMsg::BufferRelease { buffers } => {
+				for buffer in buffers {
+					let payload = format!("{} {}", buffer.monitor_id, buffer.buffer as u8);
+					let mut frame = TabMessageFrame::raw(message_header::BUFFER_RELEASE, payload);
+					if let Some(fd) = buffer.release_fence.as_ref() {
+						frame.fds.push(fd.as_raw_fd());
+					}
+					let send_result = frame.send_frame_to_async_fd(&self.socket).await;
 					if let Err(e) = send_result {
-						tracing::warn!(%monitor_id, "failed to send frame_done: {e}");
+						tracing::warn!(monitor_id = %buffer.monitor_id, buffer = buffer.buffer as u8, "failed to send buffer_release: {e}");
 						break;
 					}
+				}
+			}
+			S2CMsg::BufferRequestAck { monitor_id, buffer } => {
+				let payload = format!("{monitor_id} {}", buffer as u8);
+				if let Err(e) = TabMessageFrame::raw(message_header::BUFFER_REQUEST_ACK, payload)
+					.send_frame_to_async_fd(&self.socket)
+					.await
+				{
+					tracing::warn!(%monitor_id, buffer = buffer as u8, "failed to send buffer_request_ack: {e}");
+				}
+			}
+			S2CMsg::SessionAwake { session_id } => {
+				let payload = SessionAwakePayload {
+					session_id: session_id.to_string(),
+				};
+				if let Err(e) = TabMessageFrame::json(message_header::SESSION_AWAKE, payload)
+					.send_frame_to_async_fd(&self.socket)
+					.await
+				{
+					tracing::warn!("failed to send session awake: {e}");
+				}
+			}
+			S2CMsg::SessionActive { session_id } => {
+				let payload = SessionActivePayload {
+					session_id: session_id.to_string(),
+				};
+				if let Err(e) = TabMessageFrame::json(message_header::SESSION_ACTIVE, payload)
+					.send_frame_to_async_fd(&self.socket)
+					.await
+				{
+					tracing::warn!("failed to send session active: {e}");
+				}
+			}
+			S2CMsg::SessionState { session } => {
+				let payload = SessionStatePayload { session };
+				if let Err(e) = TabMessageFrame::json(message_header::SESSION_STATE, payload)
+					.send_frame_to_async_fd(&self.socket)
+					.await
+				{
+					tracing::warn!("failed to send session state: {e}");
+				}
+			}
+			S2CMsg::SessionSleep { session_id } => {
+				let payload = SessionSleepPayload {
+					session_id: session_id.to_string(),
+				};
+				if let Err(e) = TabMessageFrame::json(message_header::SESSION_SLEEP, payload)
+					.send_frame_to_async_fd(&self.socket)
+					.await
+				{
+					tracing::warn!("failed to send session sleep: {e}");
 				}
 			}
 			S2CMsg::MonitorAdded { monitor } => {
@@ -373,7 +451,7 @@ impl Client {
 	}
 	#[tracing::instrument(skip(self), fields(client.id = self.id().to_string()))]
 	pub async fn spawn(self) -> JoinHandle<()> {
-		tokio::spawn(self.run())
+		tokio::spawn(self.run().instrument(Span::current()))
 	}
 }
 define_id_type!(Client, "cl_");

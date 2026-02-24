@@ -16,7 +16,7 @@ pub mod unix_socket_utils;
 pub const DEFAULT_SOCKET_PATH: &str = "/tmp/shift.sock";
 /// Protocol identifier string expected in `hello` payloads. Used to check if the client and server are compatible.
 pub const PROTOCOL_VERSION: &str = const_str::concat!("tab/v", env!("CARGO_PKG_VERSION"));
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum BufferIndex {
 	Zero = 0,
@@ -44,10 +44,15 @@ pub enum TabMessage {
 		payload: FramebufferLinkPayload,
 		dma_bufs: [OwnedFd; 2],
 	},
-	SwapBuffers {
-		payload: SwapBuffersPayload,
+	BufferRequest {
+		payload: BufferRequestPayload,
+		acquire_fence: Option<OwnedFd>,
 	},
-	FrameDone(FrameDonePayload),
+	BufferRequestAck(BufferRequestAckPayload),
+	BufferRelease {
+		payload: BufferReleasePayload,
+		release_fence: Option<OwnedFd>,
+	},
 	InputEvent(InputEventPayload),
 	MonitorAdded(MonitorAddedPayload),
 	MonitorRemoved(MonitorRemovedPayload),
@@ -57,6 +62,8 @@ pub enum TabMessage {
 	SessionReady(SessionReadyPayload),
 	SessionState(SessionStatePayload),
 	SessionActive(SessionActivePayload),
+	SessionAwake(SessionAwakePayload),
+	SessionSleep(SessionSleepPayload),
 	Error(ErrorPayload),
 	Ping,
 	Pong,
@@ -71,6 +78,7 @@ impl TryFrom<TabMessageFrame> for TabMessage {
 
 impl TabMessage {
 	/// Parse the raw TabMessageFrame into a typed `TabMessage` variant.
+	#[tracing::instrument(skip_all, fields(header = %msg.header.0))]
 	pub fn parse_message_frame(msg: TabMessageFrame) -> Result<Self, ProtocolError> {
 		let header = msg.header.0.as_str();
 
@@ -102,10 +110,10 @@ impl TabMessage {
 				};
 				Ok(TabMessage::FramebufferLink { payload, dma_bufs })
 			}
-			message_header::SWAP_BUFFERS => {
+			message_header::BUFFER_REQUEST => {
 				let payload = msg.payload.clone().ok_or(ProtocolError::ExpectedPayload)?;
 				let err = ProtocolError::InvalidPayload(
-					r#""swap_buffers" request requires 2 arguments: <monitor_id> <0 or 1 (buffer index)>"#
+					r#""buffer_request" request requires 2 arguments: <monitor_id> <0 or 1 (buffer index)>"#
 						.into(),
 				);
 				let split = payload.split_ascii_whitespace().collect::<Vec<_>>();
@@ -113,15 +121,70 @@ impl TabMessage {
 					return Err(err);
 				};
 				let buffer_index = buffer_index_str.parse().map_err(|_| err)?;
-				let payload = SwapBuffersPayload {
+				let payload = BufferRequestPayload {
 					monitor_id: monitor_id.into(),
 					buffer: buffer_index,
 				};
-				Ok(TabMessage::SwapBuffers { payload })
+				let acquire_fence = match msg.fds.len() {
+					0 => None,
+					1 => Some(unsafe { OwnedFd::from_raw_fd(msg.fds[0]) }),
+					found => {
+						return Err(ProtocolError::ExpectedFds {
+							expected: 1,
+							found: found as u32,
+						});
+					}
+				};
+				Ok(TabMessage::BufferRequest {
+					payload,
+					acquire_fence,
+				})
 			}
-			message_header::FRAME_DONE => Ok(TabMessage::FrameDone(FrameDonePayload {
-				monitor_id: msg.payload.clone().ok_or(ProtocolError::ExpectedPayload)?,
-			})),
+			message_header::BUFFER_REQUEST_ACK => {
+				let payload = msg.payload.clone().ok_or(ProtocolError::ExpectedPayload)?;
+				let err = ProtocolError::InvalidPayload(
+					r#""buffer_request_ack" event requires 2 arguments: <monitor_id> <0 or 1 (buffer index)>"#
+						.into(),
+				);
+				let split = payload.split_ascii_whitespace().collect::<Vec<_>>();
+				let [monitor_id, buffer_index_str] = split[..] else {
+					return Err(err);
+				};
+				let buffer_index = buffer_index_str.parse().map_err(|_| err)?;
+				Ok(TabMessage::BufferRequestAck(BufferRequestAckPayload {
+					monitor_id: monitor_id.into(),
+					buffer: buffer_index,
+				}))
+			}
+			message_header::BUFFER_RELEASE => {
+				let payload = msg.payload.clone().ok_or(ProtocolError::ExpectedPayload)?;
+				let err = ProtocolError::InvalidPayload(
+					r#""buffer_release" event requires 2 arguments: <monitor_id> <0 or 1 (buffer index)>"#
+						.into(),
+				);
+				let split = payload.split_ascii_whitespace().collect::<Vec<_>>();
+				let [monitor_id, buffer_index_str] = split[..] else {
+					return Err(err);
+				};
+				let buffer_index = buffer_index_str.parse().map_err(|_| err)?;
+				let release_fence = match msg.fds.len() {
+					0 => None,
+					1 => Some(unsafe { OwnedFd::from_raw_fd(msg.fds[0]) }),
+					found => {
+						return Err(ProtocolError::ExpectedFds {
+							expected: 1,
+							found: found as u32,
+						});
+					}
+				};
+				Ok(TabMessage::BufferRelease {
+					payload: BufferReleasePayload {
+						monitor_id: monitor_id.into(),
+						buffer: buffer_index,
+					},
+					release_fence,
+				})
+			}
 			message_header::INPUT_EVENT => {
 				let payload: InputEventPayload = msg.expect_payload_json()?;
 				Ok(TabMessage::InputEvent(payload))
@@ -157,6 +220,14 @@ impl TabMessage {
 			message_header::SESSION_ACTIVE => {
 				let payload: SessionActivePayload = msg.expect_payload_json()?;
 				Ok(TabMessage::SessionActive(payload))
+			}
+			message_header::SESSION_AWAKE => {
+				let payload: SessionAwakePayload = msg.expect_payload_json()?;
+				Ok(TabMessage::SessionAwake(payload))
+			}
+			message_header::SESSION_SLEEP => {
+				let payload: SessionSleepPayload = msg.expect_payload_json()?;
+				Ok(TabMessage::SessionSleep(payload))
 			}
 			message_header::ERROR => {
 				let payload: ErrorPayload = msg.expect_payload_json()?;
@@ -235,14 +306,21 @@ pub struct FramebufferLinkPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SwapBuffersPayload {
+pub struct BufferRequestPayload {
 	pub monitor_id: String,
 	pub buffer: BufferIndex,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FrameDonePayload {
+pub struct BufferRequestAckPayload {
 	pub monitor_id: String,
+	pub buffer: BufferIndex,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BufferReleasePayload {
+	pub monitor_id: String,
+	pub buffer: BufferIndex,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -549,6 +627,16 @@ pub struct SessionStatePayload {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionActivePayload {
+	pub session_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionAwakePayload {
+	pub session_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionSleepPayload {
 	pub session_id: String,
 }
 

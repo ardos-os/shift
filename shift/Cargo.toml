@@ -9,6 +9,7 @@ tokio.workspace = true
 tab-protocol = { path = "../tab-protocol" }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+tracing-tracy = { workspace = true }
 nix = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }

@@ -7,7 +7,7 @@ use std::{
 
 use easydrm::gl;
 use nix::unistd::close;
-use skia_safe::gpu;
+use skia_safe::{Image, gpu};
 use thiserror::Error;
 
 use crate::rendering_layer::egl;
@@ -52,6 +52,7 @@ pub struct DmaBufTexture {
 }
 
 impl DmaBufTexture {
+	#[tracing::instrument(skip_all, fields(width = params.width, height = params.height, fourcc = params.fourcc))]
 	pub fn import(
 		gl: &gl::Gles2,
 		proc_resolver: &dyn Fn(&str) -> *const c_void,
@@ -73,7 +74,6 @@ impl DmaBufTexture {
 		}
 		let raw_fd = params.fd.into_raw_fd();
 		let mut attrs = [
-
 			egl::LINUX_DRM_FOURCC_EXT as i32,
 			params.fourcc,
 			egl::DMA_BUF_PLANE0_FD_EXT as i32,
@@ -158,7 +158,7 @@ impl DmaBufTexture {
 			texture_id: texture,
 			width: params.width,
 			height: params.height,
-			fourcc: params.fourcc
+			fourcc: params.fourcc,
 		})
 	}
 	fn skia_tex_info(&self) -> gpu::gl::TextureInfo {
@@ -169,9 +169,8 @@ impl DmaBufTexture {
 			protected: gpu::Protected::No,
 		}
 	}
+	#[tracing::instrument(skip_all)]
 	pub fn to_skia(self, label: impl AsRef<str>) -> Result<SkiaDmaBufTexture, DmaBufImportError> {
-
-
 		let backend_texture = unsafe {
 			gpu::backend_textures::make_gl(
 				(self.width, self.height),
@@ -184,7 +183,7 @@ impl DmaBufTexture {
 		Ok(SkiaDmaBufTexture {
 			backend_texture,
 			source: self,
-
+			cached_image: None,
 		})
 	}
 }
@@ -204,11 +203,26 @@ impl Drop for DmaBufTexture {
 pub struct SkiaDmaBufTexture {
 	pub backend_texture: gpu::BackendTexture,
 	source: DmaBufTexture,
+	cached_image: Option<Image>,
 }
 
 impl SkiaDmaBufTexture {
 	pub fn texture(&self) -> &gpu::BackendTexture {
 		&self.backend_texture
+	}
+
+	pub fn image<'a>(&'a mut self, gr: &mut gpu::DirectContext) -> Option<&'a Image> {
+		if self.cached_image.is_none() {
+			self.cached_image = Image::from_texture(
+				gr,
+				&self.backend_texture,
+				gpu::SurfaceOrigin::TopLeft,
+				skia_safe::ColorType::RGBA8888,
+				skia_safe::AlphaType::Opaque,
+				None,
+			);
+		}
+		self.cached_image.as_ref()
 	}
 	/// Splits into the skia texture and inner opengl texture
 	///
@@ -227,5 +241,10 @@ impl SkiaDmaBufTexture {
 				self.backend_texture.label(),
 			)
 		};
+		self.cached_image = None;
+	}
+
+	pub fn gl_texture_id(&self) -> gl::types::GLuint {
+		self.source.texture_id
 	}
 }

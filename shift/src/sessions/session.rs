@@ -13,8 +13,10 @@ pub struct Session {
 }
 
 impl Session {
-	pub fn mark_as_ready(&mut self) {
-		self.ready = true;
+	pub fn with_ready(&self, ready: bool) -> Self {
+		let mut cloned = self.clone();
+		cloned.ready = ready;
+		cloned
 	}
 	pub fn id(&self) -> SessionId {
 		self.id

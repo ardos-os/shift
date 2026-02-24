@@ -1,12 +1,20 @@
-use std::{borrow::Cow, sync::Arc};
+use std::os::fd::OwnedFd;
+use std::sync::Arc;
 
-use tab_protocol::SessionRole;
+use tab_protocol::{BufferIndex, SessionInfo};
 
 use crate::{
 	auth::{self, Token},
 	monitor::{Monitor, MonitorId},
-	sessions::{self, PendingSession, Session, SessionId},
+	sessions::{PendingSession, Session, SessionId},
 };
+
+#[derive(Debug)]
+pub struct BufferRelease {
+	pub monitor_id: MonitorId,
+	pub buffer: BufferIndex,
+	pub release_fence: Option<OwnedFd>,
+}
 
 #[derive(Debug)]
 pub enum S2CMsg {
@@ -18,8 +26,24 @@ pub enum S2CMsg {
 		error: Option<Arc<str>>,
 		shutdown: bool,
 	},
-	FrameDone {
-		monitors: Vec<MonitorId>,
+	BufferRelease {
+		buffers: Vec<BufferRelease>,
+	},
+	BufferRequestAck {
+		monitor_id: MonitorId,
+		buffer: BufferIndex,
+	},
+	SessionActive {
+		session_id: SessionId,
+	},
+	SessionState {
+		session: SessionInfo,
+	},
+	SessionAwake {
+		session_id: SessionId,
+	},
+	SessionSleep {
+		session_id: SessionId,
 	},
 	MonitorAdded {
 		monitor: Monitor,

@@ -1,31 +1,32 @@
 //! Tab client rewrite crate.
 
+mod c_bindings;
 mod config;
 mod error;
 mod events;
 mod gbm_allocator;
 mod monitor;
 mod swapchain;
-mod c_bindings;
 
 pub use config::TabClientConfig;
 pub use error::TabClientError;
-pub use events::{MonitorEvent, RenderEvent};
+pub use events::{MonitorEvent, RenderEvent, SessionEvent};
 pub use monitor::{MonitorId, MonitorState};
 pub use swapchain::{TabBuffer, TabSwapchain};
 
 use std::collections::HashMap;
 use std::os::{
-	fd::{AsRawFd, RawFd},
+	fd::{AsFd, AsRawFd, IntoRawFd, OwnedFd, RawFd},
 	unix::net::UnixStream,
 };
-use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use tab_protocol::message_frame::{TabMessageFrame, TabMessageFrameReader};
 use tab_protocol::message_header;
 use tab_protocol::{
-	AuthErrorPayload, AuthOkPayload, AuthPayload, BufferIndex, FrameDonePayload, MonitorInfo,
-	SessionInfo, TabMessage,
+	AuthErrorPayload, AuthOkPayload, AuthPayload, BufferIndex, BufferReleasePayload,
+	BufferRequestAckPayload, MonitorInfo, SessionActivePayload, SessionAwakePayload, SessionInfo,
+	SessionReadyPayload, SessionSleepPayload, SessionStatePayload, TabMessage,
 };
 
 use crate::gbm_allocator::GbmAllocator;
@@ -36,12 +37,15 @@ pub struct TabClient {
 	reader: TabMessageFrameReader,
 	session: SessionInfo,
 	monitors: HashMap<MonitorId, MonitorState>,
-	monitor_listeners: Vec<Arc<dyn Fn(&MonitorEvent) + Send + Sync>>,
-	render_listeners: Vec<Arc<dyn Fn(&RenderEvent) + Send + Sync>>,
+	monitor_listeners: Vec<Box<dyn Fn(&MonitorEvent)>>,
+	render_listeners: Vec<Box<dyn Fn(&RenderEvent)>>,
+	session_listeners: Vec<Box<dyn Fn(&SessionEvent)>>,
 	gbm: GbmAllocator,
 }
 
 impl TabClient {
+	const BUFFER_REQUEST_ACK_TIMEOUT: Duration = Duration::from_millis(250);
+
 	pub fn connect(config: TabClientConfig) -> Result<Self, TabClientError> {
 		let socket = tab_protocol::unix_socket_utils::connect_seqpacket(config.socket_path_ref())?;
 		let mut reader = TabMessageFrameReader::new();
@@ -74,6 +78,7 @@ impl TabClient {
 			monitors,
 			monitor_listeners: Vec::new(),
 			render_listeners: Vec::new(),
+			session_listeners: Vec::new(),
 			gbm,
 		})
 	}
@@ -115,36 +120,56 @@ impl TabClient {
 	pub fn framebuffer_link(&self, swapchain: &TabSwapchain) -> Result<(), TabClientError> {
 		let payload = swapchain.framebuffer_link_payload();
 		let mut frame = TabMessageFrame::json(message_header::FRAMEBUFFER_LINK, payload);
-		let fds = swapchain.export_fds()?;
-		frame.fds = fds.iter().map(|fd| fd.as_raw_fd()).collect();
+		let fds = swapchain.export_fds();
+		frame.fds = Vec::from(fds);
 		frame.encode_and_send(&self.socket)?;
-		drop(fds);
 		Ok(())
 	}
 
-	pub fn swap_buffers(&self, monitor_id: &str, buffer: BufferIndex) -> Result<(), TabClientError> {
+	pub fn request_buffer(
+		&mut self,
+		monitor_id: &str,
+		buffer: BufferIndex,
+		acquire_fence: Option<RawFd>,
+	) -> Result<(), TabClientError> {
 		let payload = format!("{monitor_id} {}", buffer as u8);
 		let frame = TabMessageFrame {
-			header: message_header::SWAP_BUFFERS.into(),
+			header: message_header::BUFFER_REQUEST.into(),
 			payload: Some(payload),
-			fds: Vec::new(),
+			fds: acquire_fence.map_or_else(Vec::new, |fd| vec![fd]),
 		};
 		frame.encode_and_send(&self.socket)?;
+		self.wait_for_buffer_request_ack(monitor_id, buffer)?;
+		Ok(())
+	}
+
+	pub fn send_ready(&self) -> Result<(), TabClientError> {
+		let payload = SessionReadyPayload {
+			session_id: self.session.id.clone(),
+		};
+		TabMessageFrame::json(message_header::SESSION_READY, payload).encode_and_send(&self.socket)?;
 		Ok(())
 	}
 
 	pub fn on_monitor_event<F>(&mut self, listener: F)
 	where
-		F: Fn(&MonitorEvent) + Send + Sync + 'static,
+		F: Fn(&MonitorEvent) + 'static,
 	{
-		self.monitor_listeners.push(Arc::new(listener));
+		self.monitor_listeners.push(Box::new(listener));
 	}
 
 	pub fn on_render_event<F>(&mut self, listener: F)
 	where
-		F: Fn(&RenderEvent) + Send + Sync + 'static,
+		F: Fn(&RenderEvent) + 'static,
 	{
-		self.render_listeners.push(Arc::new(listener));
+		self.render_listeners.push(Box::new(listener));
+	}
+
+	pub fn on_session_event<F>(&mut self, listener: F)
+	where
+		F: Fn(&SessionEvent) + 'static,
+	{
+		self.session_listeners.push(Box::new(listener));
 	}
 
 	pub fn dispatch_events(&mut self) -> Result<(), TabClientError> {
@@ -198,8 +223,23 @@ impl TabClient {
 			TabMessage::MonitorRemoved(payload) => {
 				self.handle_monitor_removed(payload.monitor_id);
 			}
-			TabMessage::FrameDone(payload) => {
-				self.handle_frame_done(payload);
+			TabMessage::BufferRelease {
+				payload,
+				release_fence,
+			} => {
+				self.handle_buffer_release(payload, release_fence);
+			}
+			TabMessage::SessionAwake(SessionAwakePayload { session_id }) => {
+				self.handle_session_awake(session_id);
+			}
+			TabMessage::SessionSleep(SessionSleepPayload { session_id }) => {
+				self.handle_session_sleep(session_id);
+			}
+			TabMessage::SessionActive(SessionActivePayload { session_id }) => {
+				self.handle_session_active(session_id);
+			}
+			TabMessage::SessionState(SessionStatePayload { session }) => {
+				self.handle_session_state(session);
 			}
 			_ => {}
 		}
@@ -223,12 +263,92 @@ impl TabClient {
 		}
 	}
 
-	fn handle_frame_done(&mut self, payload: FrameDonePayload) {
-		let event = RenderEvent::FrameDone {
-			monitor_id: payload.monitor_id,
-		};
+	fn handle_buffer_release(
+		&mut self,
+		payload: BufferReleasePayload,
+		release_fence: Option<OwnedFd>,
+	) {
+		let monitor_id = payload.monitor_id;
+		let buffer = payload.buffer;
 		for listener in &self.render_listeners {
+			let release_fence_fd = release_fence
+				.as_ref()
+				.and_then(|fd| fd.as_fd().try_clone_to_owned().ok())
+				.map(|fd| fd.into_raw_fd());
+			let event = RenderEvent::BufferReleased {
+				monitor_id: monitor_id.clone(),
+				buffer,
+				release_fence_fd,
+			};
 			listener(&event);
+		}
+	}
+
+	fn handle_session_awake(&mut self, session_id: String) {
+		let event = SessionEvent::Awake(session_id);
+		for listener in &self.session_listeners {
+			listener(&event);
+		}
+	}
+
+	fn handle_session_active(&mut self, session_id: String) {
+		let event = SessionEvent::Active(session_id);
+		for listener in &self.session_listeners {
+			listener(&event);
+		}
+	}
+
+	fn handle_session_sleep(&mut self, session_id: String) {
+		let event = SessionEvent::Sleep(session_id);
+		for listener in &self.session_listeners {
+			listener(&event);
+		}
+	}
+
+	fn handle_session_state(&mut self, session: SessionInfo) {
+		let event = SessionEvent::State(session);
+		for listener in &self.session_listeners {
+			listener(&event);
+		}
+	}
+
+	fn wait_for_buffer_request_ack(
+		&mut self,
+		monitor_id: &str,
+		buffer: BufferIndex,
+	) -> Result<(), TabClientError> {
+		let deadline = Instant::now() + Self::BUFFER_REQUEST_ACK_TIMEOUT;
+		loop {
+			if Instant::now() >= deadline {
+				return Err(TabClientError::Unexpected("buffer_request_ack timeout"));
+			}
+			match self.reader.read_framed(&self.socket) {
+				Ok(frame) => {
+					let message = TabMessage::try_from(frame)?;
+					match message {
+						TabMessage::BufferRequestAck(BufferRequestAckPayload {
+							monitor_id: ack_monitor,
+							buffer: ack_buffer,
+						}) => {
+							if ack_monitor == monitor_id && ack_buffer == buffer {
+								return Ok(());
+							}
+						}
+						TabMessage::Error(err) => {
+							let details = err
+								.message
+								.map(|m| format!("{}: {m}", err.code))
+								.unwrap_or(err.code);
+							return Err(TabClientError::Server(details));
+						}
+						other => self.handle_message(other)?,
+					}
+				}
+				Err(tab_protocol::ProtocolError::WouldBlock) => {
+					std::thread::sleep(Duration::from_micros(50));
+				}
+				Err(other) => return Err(other.into()),
+			}
 		}
 	}
 }

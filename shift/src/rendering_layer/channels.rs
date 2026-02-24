@@ -3,7 +3,7 @@ use crate::comms::{
 	server2render::{RenderCmdRx, RenderCmdTx},
 };
 
-const DEFAULT_CHANNEL_CAPACITY: usize = 128;
+const DEFAULT_CHANNEL_CAPACITY: usize = 5000;
 
 #[derive(Debug)]
 pub struct ServerEnd {

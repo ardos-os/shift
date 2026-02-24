@@ -13,6 +13,8 @@ pub enum TabClientError {
 	Nix(#[from] nix::Error),
 	#[error("authentication failed: {0}")]
 	Auth(String),
+	#[error("server rejected request: {0}")]
+	Server(String),
 	#[error("unexpected message: {0}")]
 	Unexpected(&'static str),
 	#[error("failed to open render node {path}: {source}")]
