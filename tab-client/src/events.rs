@@ -6,7 +6,10 @@ use tab_protocol::{BufferIndex, InputEventPayload, SessionInfo};
 #[derive(Debug, Clone)]
 pub enum MonitorEvent {
 	Added(MonitorState),
-	Removed(String),
+	Removed {
+		monitor_id: String,
+		name: String,
+	},
 }
 
 /// Rendering-related notifications.
@@ -25,6 +28,7 @@ pub enum SessionEvent {
 	Awake(String),
 	Sleep(String),
 	State(SessionInfo),
+	Created { session: SessionInfo, token: String },
 }
 
 #[derive(Debug, Clone)]

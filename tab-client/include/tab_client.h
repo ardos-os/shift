@@ -403,10 +403,15 @@ typedef struct {
     int32_t release_fence_fd;
 } TabBufferRelease;
 
+typedef struct {
+    const char *monitor_id;
+    const char *name;
+} TabMonitorRemoved;
+
 typedef union {
     TabBufferRelease buffer_released;
     TabMonitorInfo monitor_added;
-    const char *monitor_removed;
+    TabMonitorRemoved monitor_removed;
     TabSessionInfo session_state;
     const char *session_awake;
     const char *session_sleep;
@@ -462,6 +467,17 @@ void tab_client_free_monitor_info(TabMonitorInfo *info);
 TabSessionInfo tab_client_get_session(TabClientHandle *handle);
 void tab_client_free_session_info(TabSessionInfo *session_info);
 bool tab_client_send_ready(TabClientHandle *handle);
+bool tab_client_session_create(
+    TabClientHandle *handle,
+    TabSessionRole role,
+    const char *display_name
+);
+bool tab_client_session_switch(
+    TabClientHandle *handle,
+    const char *session_id,
+    const char *animation,
+    uint32_t duration_ms
+);
 
 size_t tab_client_poll_events(TabClientHandle *handle);
 bool tab_client_next_event(TabClientHandle *handle, TabEvent *event);

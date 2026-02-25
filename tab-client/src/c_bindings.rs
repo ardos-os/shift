@@ -8,6 +8,7 @@ use std::{
 	os::raw::{c_char, c_int},
 	ptr,
 	rc::Rc,
+	time::Duration,
 };
 
 use crate::{
@@ -58,6 +59,13 @@ pub struct TabMonitorInfo {
 	pub width: i32,
 	pub height: i32,
 	pub refresh_rate: i32,
+	pub name: *mut c_char,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct TabMonitorRemoved {
+	pub monitor_id: *mut c_char,
 	pub name: *mut c_char,
 }
 
@@ -120,7 +128,7 @@ pub struct TabEvent {
 pub union TabEventData {
 	pub buffer_released: TabBufferRelease,
 	pub monitor_added: TabMonitorInfo,
-	pub monitor_removed: *mut c_char,
+	pub monitor_removed: TabMonitorRemoved,
 	pub session_state: TabSessionInfo,
 	pub session_awake: *mut c_char,
 	pub session_sleep: *mut c_char,
@@ -450,11 +458,12 @@ struct MonitorEntry {
 enum PendingEvent {
 	BufferReleased(String, BufferIndex, Option<c_int>),
 	MonitorAdded(MonitorState),
-	MonitorRemoved(String),
+	MonitorRemoved { monitor_id: String, name: String },
 	SessionState(tab_protocol::SessionInfo),
 	SessionActive(String),
 	SessionAwake(String),
 	SessionSleep(String),
+	SessionCreated(String),
 	Input(InputEventPayload),
 }
 
@@ -476,7 +485,12 @@ impl TabClientHandle {
 				let mut guard = q.borrow_mut();
 				match evt {
 					MonitorEvent::Added(state) => guard.push_back(PendingEvent::MonitorAdded(state.clone())),
-					MonitorEvent::Removed(id) => guard.push_back(PendingEvent::MonitorRemoved(id.clone())),
+					MonitorEvent::Removed { monitor_id, name } => {
+						guard.push_back(PendingEvent::MonitorRemoved {
+							monitor_id: monitor_id.clone(),
+							name: name.clone(),
+						})
+					}
 				}
 			});
 		}
@@ -513,6 +527,9 @@ impl TabClientHandle {
 					}
 					SessionEvent::State(session) => {
 						guard.push_back(PendingEvent::SessionState(session.clone()))
+					}
+					SessionEvent::Created { token, .. } => {
+						guard.push_back(PendingEvent::SessionCreated(token.clone()))
 					}
 				}
 			});
@@ -1359,10 +1376,13 @@ pub unsafe extern "C" fn tab_client_next_event(
 				};
 				true
 			}
-			PendingEvent::MonitorRemoved(monitor_id) => {
+			PendingEvent::MonitorRemoved { monitor_id, name } => {
 				handle.remove_monitor(&monitor_id);
 				(*event).event_type = TabEventType::TAB_EVENT_MONITOR_REMOVED;
-				(*event).data.monitor_removed = dup_string(&monitor_id);
+				(*event).data.monitor_removed = TabMonitorRemoved {
+					monitor_id: dup_string(&monitor_id),
+					name: dup_string(&name),
+				};
 				true
 			}
 			PendingEvent::MonitorAdded(state) => {
@@ -1400,6 +1420,11 @@ pub unsafe extern "C" fn tab_client_next_event(
 				(*event).data.session_state = tab_session_info_to_c(&session);
 				true
 			}
+			PendingEvent::SessionCreated(token) => {
+				(*event).event_type = TabEventType::TAB_EVENT_SESSION_CREATED;
+				(*event).data.session_created_token = dup_string(&token);
+				true
+			}
 			PendingEvent::Input(input) => {
 				(*event).event_type = TabEventType::TAB_EVENT_INPUT;
 				(*event).data.input = tab_input_from_payload(&input);
@@ -1427,9 +1452,19 @@ pub unsafe extern "C" fn tab_client_free_event_strings(event: *mut TabEvent) {
 				}
 			}
 			TabEventType::TAB_EVENT_MONITOR_REMOVED => {
-				if !(*event).data.monitor_removed.is_null() {
-					drop(CString::from_raw((*event).data.monitor_removed));
-					(*event).data.monitor_removed = ptr::null_mut();
+				if !(*event).data.monitor_removed.monitor_id.is_null() {
+					drop(CString::from_raw((*event).data.monitor_removed.monitor_id));
+					(*event).data.monitor_removed.monitor_id = ptr::null_mut();
+				}
+				if !(*event).data.monitor_removed.name.is_null() {
+					drop(CString::from_raw((*event).data.monitor_removed.name));
+					(*event).data.monitor_removed.name = ptr::null_mut();
+				}
+			}
+			TabEventType::TAB_EVENT_SESSION_CREATED => {
+				if !(*event).data.session_created_token.is_null() {
+					drop(CString::from_raw((*event).data.session_created_token));
+					(*event).data.session_created_token = ptr::null_mut();
 				}
 			}
 			TabEventType::TAB_EVENT_SESSION_AWAKE => {
@@ -1608,6 +1643,53 @@ pub unsafe extern "C" fn tab_client_send_ready(handle: *mut TabClientHandle) -> 
 			return false;
 		};
 		if let Err(err) = handle.client.send_ready() {
+			handle.record_error(err);
+			return false;
+		}
+		true
+	}
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tab_client_session_create(
+	handle: *mut TabClientHandle,
+	role: TabSessionRole,
+	display_name: *const c_char,
+) -> bool {
+	unsafe {
+		let Some(handle) = handle.as_mut() else {
+			return false;
+		};
+		let role = match role {
+			TabSessionRole::TAB_SESSION_ROLE_ADMIN => tab_protocol::SessionRole::Admin,
+			TabSessionRole::TAB_SESSION_ROLE_SESSION => tab_protocol::SessionRole::Session,
+		};
+		let display_name = cstring_to_string(display_name);
+		if let Err(err) = handle.client.create_session(role, display_name) {
+			handle.record_error(err);
+			return false;
+		}
+		true
+	}
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tab_client_session_switch(
+	handle: *mut TabClientHandle,
+	session_id: *const c_char,
+	animation: *const c_char,
+	duration_ms: u32,
+) -> bool {
+	unsafe {
+		let Some(handle) = handle.as_mut() else {
+			return false;
+		};
+		let Some(session_id) = cstring_to_string(session_id) else {
+			return false;
+		};
+		let animation = cstring_to_string(animation);
+		let duration = Duration::from_millis(duration_ms as u64);
+		if let Err(err) = handle.client.switch_session(&session_id, animation, duration) {
 			handle.record_error(err);
 			return false;
 		}

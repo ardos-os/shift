@@ -26,8 +26,8 @@ use tab_protocol::message_header;
 use tab_protocol::{
 	AuthErrorPayload, AuthOkPayload, AuthPayload, BufferIndex, BufferReleasePayload,
 	BufferRequestAckPayload, InputEventPayload, MonitorInfo, SessionActivePayload,
-	SessionAwakePayload, SessionInfo, SessionReadyPayload, SessionSleepPayload, SessionStatePayload,
-	TabMessage,
+	SessionAwakePayload, SessionCreatePayload, SessionInfo, SessionReadyPayload,
+	SessionRole, SessionSleepPayload, SessionStatePayload, SessionSwitchPayload, TabMessage,
 };
 
 use crate::gbm_allocator::GbmAllocator;
@@ -154,6 +154,33 @@ impl TabClient {
 		Ok(())
 	}
 
+	pub fn create_session(
+		&self,
+		role: SessionRole,
+		display_name: Option<String>,
+	) -> Result<(), TabClientError> {
+		let payload = SessionCreatePayload { role, display_name };
+		TabMessageFrame::json(message_header::SESSION_CREATE, payload)
+			.encode_and_send(&self.socket)?;
+		Ok(())
+	}
+
+	pub fn switch_session(
+		&self,
+		session_id: &str,
+		animation: Option<String>,
+		duration: Duration,
+	) -> Result<(), TabClientError> {
+		let payload = SessionSwitchPayload {
+			session_id: session_id.to_string(),
+			animation,
+			duration,
+		};
+		TabMessageFrame::json(message_header::SESSION_SWITCH, payload)
+			.encode_and_send(&self.socket)?;
+		Ok(())
+	}
+
 	pub fn on_monitor_event<F>(&mut self, listener: F)
 	where
 		F: Fn(&MonitorEvent) + 'static,
@@ -231,7 +258,10 @@ impl TabClient {
 				self.handle_monitor_added(payload.monitor);
 			}
 			TabMessage::MonitorRemoved(payload) => {
-				self.handle_monitor_removed(payload.monitor_id);
+				self.handle_monitor_removed(payload.monitor_id, payload.name);
+			}
+			TabMessage::SessionCreated(payload) => {
+				self.handle_session_created(payload.session, payload.token);
 			}
 			TabMessage::BufferRelease {
 				payload,
@@ -268,9 +298,9 @@ impl TabClient {
 		}
 	}
 
-	fn handle_monitor_removed(&mut self, monitor_id: String) {
+	fn handle_monitor_removed(&mut self, monitor_id: String, name: String) {
 		self.monitors.remove(&monitor_id);
-		let event = MonitorEvent::Removed(monitor_id);
+		let event = MonitorEvent::Removed { monitor_id, name };
 		for listener in &self.monitor_listeners {
 			listener(&event);
 		}
@@ -313,6 +343,13 @@ impl TabClient {
 
 	fn handle_session_sleep(&mut self, session_id: String) {
 		let event = SessionEvent::Sleep(session_id);
+		for listener in &self.session_listeners {
+			listener(&event);
+		}
+	}
+
+	fn handle_session_created(&mut self, session: SessionInfo, token: String) {
+		let event = SessionEvent::Created { session, token };
 		for listener in &self.session_listeners {
 			listener(&event);
 		}
