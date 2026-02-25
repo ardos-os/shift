@@ -64,7 +64,7 @@ view:
 clean:
     rm -rf {{PROFILING_BASE_DIR}}
 
-test-harness switch_ms="2500": build-with-debug-symbols
+test-harness: build-with-debug-symbols
     #!/usr/bin/env bash
     set -euo pipefail
 
@@ -111,12 +111,10 @@ test-harness switch_ms="2500": build-with-debug-symbols
       '}' \
       "exec-once = $PLAYER \"$ASSET_SECOND\"" > "$SECOND_CFG"
 
-    export SHIFT_DEBUG_AUTO_SWITCH_INTERVAL_MS="{{switch_ms}}"
     export SHIFT_DEBUG_SECOND_SESSION_CMD="$HYPRLAND_BIN --config $SECOND_CFG"
     export ADMIN_LAUNCH_CMD="$HYPRLAND_BIN --config $ADMIN_CFG"
 
     echo "🚀 Starting Shift test harness"
     echo "   - admin media:  $ASSET_ADMIN"
     echo "   - second media: $ASSET_SECOND"
-    echo "   - auto switch:  ${SHIFT_DEBUG_AUTO_SWITCH_INTERVAL_MS}ms"
-    cargo run --bin shift --profile release-with-debug
+    sudo -E target/release-with-debug/shift

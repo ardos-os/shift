@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use tracing_subscriber::{EnvFilter, Registry, layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::{
+	input_layer::{InputLayer, channels::Channels as InputChannels},
 	rendering_layer::{RenderingLayer, channels::Channels as RenderChannels},
 	server_layer::ShiftServer,
 };
@@ -11,6 +12,7 @@ mod auth;
 mod client_layer;
 mod comms;
 mod ids;
+mod input_layer;
 mod monitor;
 mod rendering_layer;
 mod server_layer;
@@ -18,14 +20,14 @@ mod sessions;
 #[tokio::main]
 async fn main() {
 	// ---- logging/tracing ----
-	let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+	let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug"));
 	Registry::default()
 		.with(env_filter)
-		// .with(
-		// 	tracing_subscriber::fmt::layer()
-		// 		.with_target(false)
-		// 		.with_ansi(false),
-		// )
+		.with(
+			tracing_subscriber::fmt::layer()
+				.with_target(false)
+				.with_ansi(false),
+		)
 		// .with(tracing_tracy::TracyLayer::new(tracing_tracy::DefaultConfig::default()))
 		.init();
 
@@ -37,9 +39,17 @@ async fn main() {
 	// ---- create inter-layer channels ----
 	let render_channels = RenderChannels::new();
 	let (server_render_channels, rendering_render_channels) = render_channels.split();
+	let input_channels = InputChannels::new();
+	let (server_input_channels, input_layer_channels) = input_channels.split();
 
 	// ---- create server ----
-	let mut server = match ShiftServer::bind(&socket_path, server_render_channels).await {
+	let mut server = match ShiftServer::bind(
+		&socket_path,
+		server_render_channels,
+		server_input_channels.into_parts(),
+	)
+	.await
+	{
 		Ok(s) => s,
 		Err(e) => {
 			tracing::error!("failed to bind ShiftServer at {:?}: {e}", socket_path);
@@ -57,8 +67,12 @@ async fn main() {
 			return;
 		}
 	};
-	let result = tokio::join!(server.start(), rendering.run());
+	let input = InputLayer::init(input_layer_channels);
+	let result = tokio::join!(server.start(), rendering.run(), input.run());
 	if let Err(e) = result.1 {
 		tracing::error!("rendering thread ended with error: {e}");
+	}
+	if let Err(e) = result.2 {
+		tracing::error!("input layer ended with error: {e}");
 	}
 }

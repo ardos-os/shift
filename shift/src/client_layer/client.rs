@@ -396,6 +396,14 @@ impl Client {
 					tracing::warn!("failed to send session sleep: {e}");
 				}
 			}
+			S2CMsg::InputEvent { event } => {
+				if let Err(e) = TabMessageFrame::json(message_header::INPUT_EVENT, event)
+					.send_frame_to_async_fd(&self.socket)
+					.await
+				{
+					tracing::warn!("failed to send input event: {e}");
+				}
+			}
 			S2CMsg::MonitorAdded { monitor } => {
 				let payload = MonitorAddedPayload {
 					monitor: monitor.to_protocol_info(),

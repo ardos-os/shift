@@ -10,7 +10,7 @@ mod swapchain;
 
 pub use config::TabClientConfig;
 pub use error::TabClientError;
-pub use events::{MonitorEvent, RenderEvent, SessionEvent};
+pub use events::{InputEvent, MonitorEvent, RenderEvent, SessionEvent};
 pub use monitor::{MonitorId, MonitorState};
 pub use swapchain::{TabBuffer, TabSwapchain};
 
@@ -25,8 +25,9 @@ use tab_protocol::message_frame::{TabMessageFrame, TabMessageFrameReader};
 use tab_protocol::message_header;
 use tab_protocol::{
 	AuthErrorPayload, AuthOkPayload, AuthPayload, BufferIndex, BufferReleasePayload,
-	BufferRequestAckPayload, MonitorInfo, SessionActivePayload, SessionAwakePayload, SessionInfo,
-	SessionReadyPayload, SessionSleepPayload, SessionStatePayload, TabMessage,
+	BufferRequestAckPayload, InputEventPayload, MonitorInfo, SessionActivePayload,
+	SessionAwakePayload, SessionInfo, SessionReadyPayload, SessionSleepPayload, SessionStatePayload,
+	TabMessage,
 };
 
 use crate::gbm_allocator::GbmAllocator;
@@ -40,6 +41,7 @@ pub struct TabClient {
 	monitor_listeners: Vec<Box<dyn Fn(&MonitorEvent)>>,
 	render_listeners: Vec<Box<dyn Fn(&RenderEvent)>>,
 	session_listeners: Vec<Box<dyn Fn(&SessionEvent)>>,
+	input_listeners: Vec<Box<dyn Fn(&InputEvent)>>,
 	gbm: GbmAllocator,
 }
 
@@ -79,6 +81,7 @@ impl TabClient {
 			monitor_listeners: Vec::new(),
 			render_listeners: Vec::new(),
 			session_listeners: Vec::new(),
+			input_listeners: Vec::new(),
 			gbm,
 		})
 	}
@@ -172,6 +175,13 @@ impl TabClient {
 		self.session_listeners.push(Box::new(listener));
 	}
 
+	pub fn on_input_event<F>(&mut self, listener: F)
+	where
+		F: Fn(&InputEvent) + 'static,
+	{
+		self.input_listeners.push(Box::new(listener));
+	}
+
 	pub fn dispatch_events(&mut self) -> Result<(), TabClientError> {
 		loop {
 			match self.reader.read_framed(&self.socket) {
@@ -241,6 +251,9 @@ impl TabClient {
 			TabMessage::SessionState(SessionStatePayload { session }) => {
 				self.handle_session_state(session);
 			}
+			TabMessage::InputEvent(payload) => {
+				self.handle_input_event(payload);
+			}
 			_ => {}
 		}
 		Ok(())
@@ -308,6 +321,13 @@ impl TabClient {
 	fn handle_session_state(&mut self, session: SessionInfo) {
 		let event = SessionEvent::State(session);
 		for listener in &self.session_listeners {
+			listener(&event);
+		}
+	}
+
+	fn handle_input_event(&mut self, payload: InputEventPayload) {
+		let event = InputEvent::Event(payload);
+		for listener in &self.input_listeners {
 			listener(&event);
 		}
 	}

@@ -10,7 +10,7 @@ use crate::{
 	monitor::{Monitor, MonitorId},
 	sessions::{PendingSession, Session, SessionId},
 };
-use tab_protocol::SessionInfo;
+use tab_protocol::{InputEventPayload, SessionInfo};
 
 #[derive(Debug)]
 pub struct ChannelsServerEnd(C2SRx, S2CTx);
@@ -197,6 +197,15 @@ impl ClientView {
 			.channels
 			.1
 			.send(S2CMsg::SessionSleep { session_id })
+			.await
+			.is_ok()
+	}
+
+	pub async fn notify_input_event(&mut self, event: InputEventPayload) -> bool {
+		self
+			.channels
+			.1
+			.send(S2CMsg::InputEvent { event })
 			.await
 			.is_ok()
 	}

@@ -47,7 +47,7 @@ impl RenderingLayer {
 			}
 
 			unsafe {
-				mon.gl().ClearColor(1.0, 0.0, 0.0, 1.0);
+				mon.gl().ClearColor(0.0, 0.0, 0.0, 1.0);
 				mon.gl().Clear(COLOR_BUFFER_BIT | DEPTH_BUFFER_BIT);
 			}
 

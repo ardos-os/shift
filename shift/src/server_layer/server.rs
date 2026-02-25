@@ -30,6 +30,7 @@ use crate::{
 	},
 	comms::{
 		client2server::C2SMsg,
+		input2server::{InputEvt, InputEvtRx},
 		render2server::{RenderEvt, RenderEvtRx},
 		server2client::BufferRelease,
 		server2render::{RenderCmd, RenderCmdTx, SessionTransition},
@@ -38,7 +39,7 @@ use crate::{
 	rendering_layer::channels::ServerEnd as RenderServerChannels,
 	sessions::{PendingSession, Role, Session, SessionId},
 };
-use tab_protocol::{SessionInfo, SessionLifecycle, SessionRole};
+use tab_protocol::{InputEventPayload, SessionInfo, SessionLifecycle, SessionRole};
 
 #[derive(Debug, Clone, Copy)]
 struct PendingFlip {
@@ -80,6 +81,7 @@ pub struct ShiftServer {
 	connected_clients: HashMap<ClientId, ConnectedClient>,
 	render_commands: RenderCmdTx,
 	render_events: RenderEvtRx,
+	input_events: InputEvtRx,
 	monitors: HashMap<MonitorId, Monitor>,
 	pending_buffer_requests: Vec<PendingBufferRequest>,
 	waiting_flip: Vec<PendingFlip>,
@@ -92,6 +94,7 @@ pub struct ShiftServer {
 	debug_admin_session_id: Option<SessionId>,
 	debug_second_session_id: Option<SessionId>,
 	debug_auto_switch_interval: Option<Duration>,
+	pending_input_motion: Option<(SessionId, InputEventPayload)>,
 }
 #[derive(Error, Debug)]
 pub enum BindError {
@@ -103,6 +106,7 @@ impl ShiftServer {
 	pub async fn bind(
 		path: impl AsRef<Path>,
 		render_channels: RenderServerChannels,
+		input_events: InputEvtRx,
 	) -> Result<Self, BindError> {
 		std::fs::remove_file(&path).ok();
 		let listener = UnixListener::bind(&path)?;
@@ -136,6 +140,7 @@ impl ShiftServer {
 			connected_clients: Default::default(),
 			render_commands,
 			render_events,
+			input_events,
 			monitors: Default::default(),
 			pending_buffer_requests: Default::default(),
 			waiting_flip: Default::default(),
@@ -148,6 +153,7 @@ impl ShiftServer {
 			debug_admin_session_id: None,
 			debug_second_session_id: None,
 			debug_auto_switch_interval,
+			pending_input_motion: None,
 		})
 	}
 
@@ -381,6 +387,7 @@ impl ShiftServer {
 		let listener = self.listener.take().unwrap();
 		let mut stats_tick = tokio::time::interval(std::time::Duration::from_secs(1));
 		let mut debug_auto_switch_tick = self.debug_auto_switch_interval.map(tokio::time::interval);
+		let mut input_flush_tick = tokio::time::interval(std::time::Duration::from_millis(4));
 		loop {
 			let span = tracing::trace_span!(
 				"server_loop",
@@ -413,6 +420,16 @@ impl ShiftServer {
 									tracing::warn!("render layer event channel closed");
 									return;
 							}
+					}
+					input_event = self.input_events.recv() => {
+						if let Some(event) = input_event {
+							self.handle_input_event(event).await;
+						} else {
+							tracing::warn!("input layer event channel closed");
+						}
+					}
+					_ = input_flush_tick.tick() => {
+						self.flush_pending_input_motion().await;
 					}
 					_ = async {
 						if let Some(tick) = &mut debug_auto_switch_tick {
@@ -761,6 +778,25 @@ impl ShiftServer {
 					.copied()
 					.unwrap_or(BufferOwner::Client);
 				if current_owner != BufferOwner::Client {
+					let other_buffer = if buffer == tab_protocol::BufferIndex::Zero {
+						tab_protocol::BufferIndex::One
+					} else {
+						tab_protocol::BufferIndex::Zero
+					};
+					let other_owner = self
+						.buffer_ownership
+						.get(&(client_session.id(), monitor_id, other_buffer))
+						.copied()
+						.unwrap_or(BufferOwner::Client);
+					tracing::warn!(
+						session_id = %client_session.id(),
+						%monitor_id,
+						requested = buffer as u8,
+						requested_owner = ?current_owner,
+						other = other_buffer as u8,
+						other_owner = ?other_owner,
+						"incoming buffer request for non client-owned buffer"
+					);
 					if let Some(client) = self.connected_clients.get_mut(&client_id) {
 						client
 							.client_view
@@ -987,6 +1023,99 @@ impl ShiftServer {
 			}
 		}
 	}
+
+	async fn handle_input_event(&mut self, event: InputEvt) {
+		match event {
+			InputEvt::Event(input_event) => {
+				let Some(active_session_id) = self.current_session else {
+					return;
+				};
+				if Self::is_coalescable_motion(&input_event) {
+					match self.pending_input_motion.as_ref() {
+						Some((pending_session, pending_event))
+							if *pending_session == active_session_id
+								&& Self::same_motion_kind(pending_event, &input_event) =>
+						{
+							self.pending_input_motion = Some((active_session_id, input_event));
+						}
+						Some(_) => {
+							self.flush_pending_input_motion().await;
+							self.pending_input_motion = Some((active_session_id, input_event));
+						}
+						None => {
+							self.pending_input_motion = Some((active_session_id, input_event));
+						}
+					}
+				} else {
+					self.flush_pending_input_motion().await;
+					self
+						.forward_input_event_to_session(active_session_id, input_event)
+						.await;
+				}
+			}
+			InputEvt::FatalError { reason } => {
+				tracing::error!(%reason, "input layer fatal error");
+			}
+		}
+	}
+
+	fn is_coalescable_motion(event: &InputEventPayload) -> bool {
+		matches!(
+			event,
+			InputEventPayload::PointerMotion { .. } | InputEventPayload::PointerMotionAbsolute { .. }
+		)
+	}
+
+	fn same_motion_kind(lhs: &InputEventPayload, rhs: &InputEventPayload) -> bool {
+		matches!(
+			(lhs, rhs),
+			(
+				InputEventPayload::PointerMotion { .. },
+				InputEventPayload::PointerMotion { .. }
+			) | (
+				InputEventPayload::PointerMotionAbsolute { .. },
+				InputEventPayload::PointerMotionAbsolute { .. }
+			)
+		)
+	}
+
+	async fn flush_pending_input_motion(&mut self) {
+		let Some((session_id, event)) = self.pending_input_motion.take() else {
+			return;
+		};
+		if self.current_session != Some(session_id) {
+			return;
+		}
+		if self.has_inflight_buffer_request_for_session(session_id) {
+			self.pending_input_motion = Some((session_id, event));
+			return;
+		}
+		self.forward_input_event_to_session(session_id, event).await;
+	}
+
+	fn has_inflight_buffer_request_for_session(&self, session_id: SessionId) -> bool {
+		self
+			.pending_buffer_requests
+			.iter()
+			.any(|pending| pending.session_id == session_id)
+	}
+
+	async fn forward_input_event_to_session(
+		&mut self,
+		session_id: SessionId,
+		event: InputEventPayload,
+	) {
+		let Some((_id, client)) = self
+			.connected_clients
+			.iter_mut()
+			.find(|(_, c)| c.client_view.authenticated_session() == Some(session_id))
+		else {
+			return;
+		};
+		if !client.client_view.notify_input_event(event).await {
+			tracing::warn!(%session_id, "failed to send input event to active session");
+		}
+	}
 	async fn read_clients_messages(
 		connected_clients: &mut HashMap<ClientId, ConnectedClient>,
 	) -> (ClientId, C2SMsg) {
@@ -1116,6 +1245,7 @@ impl ShiftServer {
 		next: Option<SessionId>,
 		transition: Option<SessionTransition>,
 	) {
+		self.pending_input_motion = None;
 		self.current_session = next;
 		self.prune_expired_awake_sessions().await;
 		self.set_awake_sessions(next.into_iter()).await;

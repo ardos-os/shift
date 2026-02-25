@@ -1,7 +1,7 @@
 use std::os::fd::OwnedFd;
 use std::sync::Arc;
 
-use tab_protocol::{BufferIndex, SessionInfo};
+use tab_protocol::{BufferIndex, InputEventPayload, SessionInfo};
 
 use crate::{
 	auth::{self, Token},
@@ -44,6 +44,9 @@ pub enum S2CMsg {
 	},
 	SessionSleep {
 		session_id: SessionId,
+	},
+	InputEvent {
+		event: InputEventPayload,
 	},
 	MonitorAdded {
 		monitor: Monitor,
