@@ -1,0 +1,11 @@
+.git
+target
+**/target
+vendor
+.envrc
+.rustfmt.toml
+default.nix
+Justfile
+README.md
+tab
+test

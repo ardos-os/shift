@@ -23,7 +23,7 @@ getrandom = { version = "0.3.4", features = ["std"] }
 subtle = "2.6.1"
 chrono = "0.4.43"
 futures = { version = "0.3.31", default-features = false, features = ["alloc"] }
-skia-safe = { version = "0.91.1", features = ["gl"] }
+skia-safe.workspace = true
 
 [build-dependencies]
 gl_generator = "0.14"

@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+if [[ " $* " == *"/target/release/deps/shift-"* ]]; then
+    extra_libs=(-lskia -lstdc++ -levdev -lmtdev -lwacom -ludev)
+
+    if [[ " $* " == *"libskia_bindings-"*".rlib"* ]]; then
+        echo "ardos-linker: skia-bindings rlib already present; not appending extracted objects" >&2
+        exec x86_64-linux-gnu-gcc "$@" "${extra_libs[@]}"
+    fi
+
+    bindings_archive="$(
+        find "${CARGO_TARGET_DIR}/release/build" \
+            -path '*/out/skia/libskia-bindings.a' \
+            -printf '%T@ %p\n' |
+            sort -nr |
+            head -n1 |
+            cut -d' ' -f2-
+    )"
+    bindings_objects="${CARGO_TARGET_DIR}/release/ardos-skia-bindings"
+    rm -rf "${bindings_objects}"
+    mkdir -p "${bindings_objects}"
+    (
+        cd "${bindings_objects}"
+        ar x "${bindings_archive}"
+    )
+    mapfile -t object_files < <(find "${bindings_objects}" -name '*.o' -print | sort)
+
+    echo "ardos-linker: appending ${bindings_archive}" >&2
+    exec x86_64-linux-gnu-gcc "$@" \
+        "${object_files[@]}" \
+        "${extra_libs[@]}"
+fi
+
+exec x86_64-linux-gnu-gcc "$@"
