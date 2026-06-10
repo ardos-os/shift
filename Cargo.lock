@@ -252,7 +252,7 @@ dependencies = [
 [[package]]
 name = "easydrm"
 version = "0.3.0"
-source = "git+https://github.com/ardos-os/easydrm?branch=main#01d9d4dd4043bf7a5c16095d87fdd062090c9016"
+source = "git+https://github.com/ardos-os/easydrm?branch=main#5645dd601a1847ac4c48670ba7486a7dbf1f8cbb"
 dependencies = [
  "drm",
  "drm-sys",
@@ -1501,7 +1501,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c5f7c95348f20c1c913d72157b3c6dee6ea3e30b3d19502c5a7f6d3f160dacbf"
 dependencies = [
  "cc",
- "windows-targets 0.52.6",
+ "windows-targets 0.48.5",
 ]
 
 [[package]]
