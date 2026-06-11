@@ -49,5 +49,5 @@ build() {
 package() {
     install -Dm755 \
         "$(_cargo_target_dir)/release/shift" \
-        "${pkgdir}/usr/bin/shift"
+        "${pkgdir}/ardos/services/shift/shift"
 }
