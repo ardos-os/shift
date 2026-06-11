@@ -1,4 +1,5 @@
 /target
 .direnv
 .env
+/Cargo.lock
 /profiling/run_2026-02-17_19-46-19

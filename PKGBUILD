@@ -41,7 +41,6 @@ build() {
 
     cargo build \
         --manifest-path "${startdir}/Cargo.toml" \
-        --locked \
         --release \
         -p shift
 }

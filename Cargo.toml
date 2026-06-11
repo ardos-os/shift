@@ -26,10 +26,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tracing-tracy = "0.11"
 # easydrm = {path="../easydrm"}
-easydrm = {git = "https://github.com/ardos-os/easydrm", branch="main"}
+easydrm = {git = "https://github.com/ardos-os/easydrm", rev="5645dd601a1847ac4c48670ba7486a7dbf1f8cbb"}
 tokio = {version="1.49.0", features=["macros", "net", "rt-multi-thread", "time", "sync"]}
 anyhow = "1.0"
-skia-safe = { git = "https://github.com/coffeeispower/rust-skia.git", rev = "e51839613c4841e5e09e7d50d94f78bd4d811130", version = "0.91.0", default-features = false, features = ["gl"] }
+skia-safe = { git = "https://github.com/coffeeispower/rust-skia.git", rev = "e51839613c4841e5e09e7d50d94f78bd4d811130", version = "0.91.0", default-features = false, features = ["gl", "binary-cache"] }
 [profile.release-with-debug]
 inherits = "release"
 debug = true

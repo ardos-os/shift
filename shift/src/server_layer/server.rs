@@ -370,11 +370,21 @@ impl ShiftServer {
 		let id = session.id();
 		self.pending_sessions.insert(token.clone(), session);
 
-		let admin_launch_cmd = std::env::var("ADMIN_LAUNCH_CMD").ok();
-		let shell = std::env::var("SHELL").unwrap_or_else(|_| "bash".to_string());
-		if let Some(admin_launch_cmd) = admin_launch_cmd {
-			let mut cmd = Command::new(shell);
-			cmd.args(["-c", &admin_launch_cmd]);
+		let mut admin_command = std::env::var("ADMIN_LAUNCH_CMD")
+			.ok()
+			.map(|admin_launch_cmd| {
+				let shell = std::env::var("SHELL").unwrap_or_else(|_| "bash".to_string());
+				let mut cmd = Command::new(shell);
+				cmd.args(["-c", &admin_launch_cmd]);
+				cmd
+			})
+			.or_else(|| {
+				let tibs = "/ardos/services/tibs/tibs";
+				std::path::Path::new(tibs)
+					.is_file()
+					.then(|| Command::new(tibs))
+			});
+		if let Some(cmd) = admin_command.as_mut() {
 			cmd.env("SHIFT_SESSION_TOKEN", token.to_string());
 			if let Err(e) = cmd.spawn() {
 				panic!("Failed to start admin session process: {e}");
