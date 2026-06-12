@@ -1,7 +1,7 @@
 use std::{
 	collections::HashMap,
 	io::ErrorKind,
-	os::fd::{AsRawFd, OwnedFd},
+	os::fd::{AsFd, AsRawFd, OwnedFd},
 	sync::{Arc, Mutex},
 };
 
@@ -136,9 +136,16 @@ async fn wait_many_fences(fences: Vec<OwnedFd>, mode: FenceWaitMode) -> bool {
 }
 
 async fn wait_one_fence(fd: OwnedFd) -> bool {
+	let raw_fd = fd.as_fd().as_raw_fd();
 	let afd = match AsyncFd::new(fd) {
-		Ok(afd) => afd,
-		Err(_) => return false,
+		Ok(afd) => {
+			tracing::debug!(fd = raw_fd, "waiting on fence fd");
+			afd
+		}
+		Err(err) => {
+			tracing::warn!(fd = raw_fd, %err, "failed to create AsyncFd for fence");
+			return false;
+		}
 	};
 
 	loop {

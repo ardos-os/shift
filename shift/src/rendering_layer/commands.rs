@@ -87,11 +87,14 @@ impl RenderingLayer {
 			let release_fence = if release_fence >= 0 {
 				let dup_fd = unsafe { libc::dup(release_fence) };
 				if dup_fd >= 0 {
+					tracing::debug!(monitor_id = %item.monitor_id, buffer = ?item.buffer, release_fence = dup_fd, "deferring buffer release with fence");
 					Some(unsafe { OwnedFd::from_raw_fd(dup_fd) })
 				} else {
+					tracing::warn!(monitor_id = %item.monitor_id, buffer = ?item.buffer, "failed to duplicate release fence fd");
 					None
 				}
 			} else {
+				tracing::debug!(monitor_id = %item.monitor_id, buffer = ?item.buffer, "no release fence for deferred buffer release");
 				None
 			};
 			self

@@ -15,9 +15,9 @@ use tab_client::{
 };
 use tab_client::{TabClient, TabClientConfig, TabClientError, TabSwapchain};
 use tab_protocol::{BufferIndex, ButtonState, InputEventPayload, KeyState, TouchContact};
+pub use tab_protocol::{SessionCreatedPayload, SessionInfo, SessionRole};
 use thiserror::Error;
 use tracing::{debug, info};
-pub use tab_protocol::{SessionCreatedPayload, SessionInfo, SessionRole};
 
 const BTN_LEFT: u32 = 272;
 
@@ -37,7 +37,7 @@ pub struct Config {
 	socket_path: PathBuf,
 	render_node_path: Option<PathBuf>,
 	render_mode: RenderMode,
-	opengl_version: (u8, u8),
+	opengl_es_version: (u8, u8),
 }
 
 impl Config {
@@ -48,7 +48,7 @@ impl Config {
 			socket_path: tab_protocol::DEFAULT_SOCKET_PATH.into(),
 			render_node_path: None,
 			render_mode: RenderMode::Scheduled,
-			opengl_version: (3, 3),
+			opengl_es_version: (3, 0),
 		}
 	}
 
@@ -85,9 +85,9 @@ impl Config {
 		self
 	}
 
-	/// Requests a specific OpenGL/OpenGL ES version.
-	pub fn opengl_version(&mut self, major: u8, minor: u8) -> &mut Self {
-		self.opengl_version = (major, minor);
+	/// Requests a specific OpenGL ES version.
+	pub fn opengl_es_version(&mut self, major: u8, minor: u8) -> &mut Self {
+		self.opengl_es_version = (major, minor);
 		self
 	}
 
@@ -96,9 +96,9 @@ impl Config {
 		self.render_mode
 	}
 
-	/// Returns the requested OpenGL/OpenGL ES version.
-	pub fn requested_opengl_version(&self) -> (u8, u8) {
-		self.opengl_version
+	/// Returns the requested OpenGL ES version.
+	pub fn requested_opengl_es_version(&self) -> (u8, u8) {
+		self.opengl_es_version
 	}
 
 	/// Returns the configured session token.
@@ -435,13 +435,9 @@ pub enum TouchEvent {
 		contact_id: i32,
 	},
 	/// End of touch event frame batch.
-	Frame {
-		time_usec: u64,
-	},
+	Frame { time_usec: u64 },
 	/// Touch sequence cancelled.
-	Cancel {
-		time_usec: u64,
-	},
+	Cancel { time_usec: u64 },
 }
 
 /// High-level multi-finger gesture event stream.
@@ -626,7 +622,8 @@ impl<'a, A: Application> Context<'a, A> {
 					.into(),
 			));
 		}
-		let (cx, cy) = clamp_point_to_layout(&placements, self.cursor_position.0, self.cursor_position.1);
+		let (cx, cy) =
+			clamp_point_to_layout(&placements, self.cursor_position.0, self.cursor_position.1);
 		*self.cursor_position = (cx, cy);
 		Ok(())
 	}
@@ -635,7 +632,8 @@ impl<'a, A: Application> Context<'a, A> {
 	pub fn apply_horizontal_layout(&mut self) {
 		recompute_layout(self.monitors);
 		let placements = current_layout(self.monitors);
-		let (cx, cy) = clamp_point_to_layout(&placements, self.cursor_position.0, self.cursor_position.1);
+		let (cx, cy) =
+			clamp_point_to_layout(&placements, self.cursor_position.0, self.cursor_position.1);
 		*self.cursor_position = (cx, cy);
 	}
 
@@ -685,7 +683,8 @@ impl<'a, A: Application> Context<'a, A> {
 		role: SessionRole,
 		display_name: Option<String>,
 	) -> Result<SessionCreatedPayload, FrameworkError> {
-		self.client
+		self
+			.client
 			.create_session(role, display_name)
 			.map_err(FrameworkError::from)
 	}
@@ -697,7 +696,8 @@ impl<'a, A: Application> Context<'a, A> {
 		animation: Option<String>,
 		duration: Duration,
 	) -> Result<(), FrameworkError> {
-		self.client
+		self
+			.client
 			.switch_session(session_id, animation, duration)
 			.map_err(FrameworkError::from)
 	}
@@ -750,28 +750,26 @@ impl<A: Application> TabAppFramework<A> {
 			let swapchain = client.create_swapchain(&monitor.id)?;
 			monitors.insert(monitor.id.clone(), MonitorRuntime::new(monitor, swapchain));
 		}
-			recompute_layout(&mut monitors);
-			let initial_cursor = {
-				let placements = current_layout(&monitors);
-				let seed = placements
-					.iter()
-					.min_by(|a, b| {
-						(a.x, a.y, a.id.as_str()).cmp(&(b.x, b.y, b.id.as_str()))
-					})
-					.map(|m| {
-						(
-							m.x as f64 + (m.width.max(1) as f64 / 2.0),
-							m.y as f64 + (m.height.max(1) as f64 / 2.0),
-						)
-					})
-					.unwrap_or((0.0, 0.0));
-				clamp_point_to_layout(&placements, seed.0, seed.1)
-			};
-			let scheduled = if cfg.render_mode == RenderMode::Eager {
-				monitors.keys().cloned().collect()
-			} else {
-				HashSet::new()
-			};
+		recompute_layout(&mut monitors);
+		let initial_cursor = {
+			let placements = current_layout(&monitors);
+			let seed = placements
+				.iter()
+				.min_by(|a, b| (a.x, a.y, a.id.as_str()).cmp(&(b.x, b.y, b.id.as_str())))
+				.map(|m| {
+					(
+						m.x as f64 + (m.width.max(1) as f64 / 2.0),
+						m.y as f64 + (m.height.max(1) as f64 / 2.0),
+					)
+				})
+				.unwrap_or((0.0, 0.0));
+			clamp_point_to_layout(&placements, seed.0, seed.1)
+		};
+		let scheduled = if cfg.render_mode == RenderMode::Eager {
+			monitors.keys().cloned().collect()
+		} else {
+			HashSet::new()
+		};
 
 		Ok(Self {
 			app,
@@ -780,15 +778,15 @@ impl<A: Application> TabAppFramework<A> {
 			monitors,
 			scheduled,
 			watched_fds: HashSet::new(),
-				event_queue: queue,
-				exiting: false,
-				next_acquire_fence: None,
-				stats: LoopStats::new(),
-				cursor_position: initial_cursor,
-				touch_contacts: HashMap::new(),
-				primary_touch_id: None,
-			})
-		}
+			event_queue: queue,
+			exiting: false,
+			next_acquire_fence: None,
+			stats: LoopStats::new(),
+			cursor_position: initial_cursor,
+			touch_contacts: HashMap::new(),
+			primary_touch_id: None,
+		})
+	}
 
 	/// Runs the main event/render loop until exit is requested.
 	pub fn run(&mut self) -> Result<(), FrameworkError> {
@@ -953,7 +951,11 @@ impl<A: Application> TabAppFramework<A> {
 					self.stats.instant_log(&format!(
 						"buffer_release event monitor={monitor_id} buffer={} fence={}",
 						buffer as u8,
-						if release_fence_fd.is_some() { "yes" } else { "no" }
+						if release_fence_fd.is_some() {
+							"yes"
+						} else {
+							"no"
+						}
 					));
 					let mut should_emit_present = false;
 					if let Some(monitor) = self.monitors.get_mut(&monitor_id) {
@@ -994,374 +996,371 @@ impl<A: Application> TabAppFramework<A> {
 							},
 						)
 					});
-						match payload {
-							InputEventPayload::Key {
-								device,
-								time_usec,
-								key,
-								state,
-							} => {
-								self.call_app(|app, ctx| {
-									app.on_key(
-										ctx,
-										KeyEvent {
-											device,
-											time_usec,
-											key,
-											state,
-										},
-									)
-								});
-							}
-							InputEventPayload::PointerMotion {
-								device,
-								time_usec,
+					match payload {
+						InputEventPayload::Key {
+							device,
+							time_usec,
+							key,
+							state,
+						} => {
+							self.call_app(|app, ctx| {
+								app.on_key(
+									ctx,
+									KeyEvent {
+										device,
+										time_usec,
+										key,
+										state,
+									},
+								)
+							});
+						}
+						InputEventPayload::PointerMotion {
+							device,
+							time_usec,
+							dx,
+							dy,
+							..
+						} => {
+							let old_position = self.cursor_position;
+							let placements = current_layout(&self.monitors);
+							self.cursor_position = move_cursor_no_tunnel(
+								&placements,
+								self.cursor_position.0,
+								self.cursor_position.1,
 								dx,
 								dy,
-								..
-							} => {
-								let old_position = self.cursor_position;
-								let placements = current_layout(&self.monitors);
-								self.cursor_position = move_cursor_no_tunnel(
-									&placements,
-									self.cursor_position.0,
-									self.cursor_position.1,
-									dx,
-									dy,
-								);
+							);
+							self.emit_cursor_move(
+								PointerMoveEvent {
+									device,
+									time_usec,
+									pointer_type: PointerType::Mouse,
+									old_position,
+									new_position: self.cursor_position,
+								},
+								true,
+							);
+						}
+						InputEventPayload::PointerButton {
+							device,
+							time_usec,
+							button,
+							state,
+						} => match state {
+							ButtonState::Pressed => self.emit_pointer_down(
+								PointerDownEvent {
+									device,
+									time_usec,
+									pointer_type: PointerType::Mouse,
+									button,
+									position: self.cursor_position,
+								},
+								true,
+							),
+							ButtonState::Released => self.emit_pointer_up(
+								PointerUpEvent {
+									device,
+									time_usec,
+									pointer_type: PointerType::Mouse,
+									button,
+									position: self.cursor_position,
+								},
+								true,
+							),
+						},
+						InputEventPayload::PointerMotionAbsolute {
+							device,
+							time_usec,
+							x_transformed,
+							y_transformed,
+							..
+						} => {
+							let old_position = self.cursor_position;
+							let placements = current_layout(&self.monitors);
+							self.cursor_position =
+								clamp_point_to_layout(&placements, x_transformed, y_transformed);
+							self.emit_cursor_move(
+								PointerMoveEvent {
+									device,
+									time_usec,
+									pointer_type: PointerType::Mouse,
+									old_position,
+									new_position: self.cursor_position,
+								},
+								true,
+							);
+						}
+						InputEventPayload::TabletToolAxis {
+							device,
+							time_usec,
+							axes,
+							..
+						} => {
+							let old_position = self.cursor_position;
+							let placements = current_layout(&self.monitors);
+							let (mut x, mut y) = (axes.x, axes.y);
+							if (0.0..=1.0).contains(&x) && (0.0..=1.0).contains(&y) {
+								let max_x = placements
+									.iter()
+									.map(|m| m.x.saturating_add(m.width))
+									.max()
+									.unwrap_or(0)
+									.max(1) as f64;
+								let max_y = placements
+									.iter()
+									.map(|m| m.y.saturating_add(m.height))
+									.max()
+									.unwrap_or(0)
+									.max(1) as f64;
+								x *= max_x;
+								y *= max_y;
+							}
+							self.cursor_position = clamp_point_to_layout(&placements, x, y);
+							self.emit_cursor_move(
+								PointerMoveEvent {
+									device,
+									time_usec,
+									pointer_type: PointerType::Pen,
+									old_position,
+									new_position: self.cursor_position,
+								},
+								false,
+							);
+						}
+						InputEventPayload::TouchDown {
+							device,
+							time_usec,
+							contact,
+						} => {
+							let placements = current_layout(&self.monitors);
+							let mut x = contact.x_transformed;
+							let mut y = contact.y_transformed;
+							if x > 1.0 || y > 1.0 {
+								x /= 65535.0;
+								y /= 65535.0;
+							}
+							let max_x = placements
+								.iter()
+								.map(|m| m.x.saturating_add(m.width))
+								.max()
+								.unwrap_or(0)
+								.max(1) as f64;
+							let max_y = placements
+								.iter()
+								.map(|m| m.y.saturating_add(m.height))
+								.max()
+								.unwrap_or(0)
+								.max(1) as f64;
+							let old_position = self.cursor_position;
+							self.cursor_position = clamp_point_to_layout(&placements, x * max_x, y * max_y);
+							self.touch_contacts.insert(contact.id, self.cursor_position);
+							self.emit_touch(TouchEvent::Down {
+								device,
+								time_usec,
+								contact: contact.clone(),
+							});
+							if self.primary_touch_id.is_none() {
+								self.primary_touch_id = Some(contact.id);
 								self.emit_cursor_move(
 									PointerMoveEvent {
 										device,
 										time_usec,
-										pointer_type: PointerType::Mouse,
+										pointer_type: PointerType::Touch,
 										old_position,
 										new_position: self.cursor_position,
 									},
-									true,
+									false,
 								);
-							}
-							InputEventPayload::PointerButton {
-								device,
-								time_usec,
-								button,
-								state,
-							} => match state {
-								ButtonState::Pressed => self.emit_pointer_down(
+								self.emit_pointer_down(
 									PointerDownEvent {
 										device,
 										time_usec,
-										pointer_type: PointerType::Mouse,
-										button,
+										pointer_type: PointerType::Touch,
+										button: BTN_LEFT,
 										position: self.cursor_position,
 									},
-									true,
-								),
-								ButtonState::Released => self.emit_pointer_up(
-									PointerUpEvent {
-										device,
-										time_usec,
-										pointer_type: PointerType::Mouse,
-										button,
-										position: self.cursor_position,
-									},
-									true,
-								),
-							},
-							InputEventPayload::PointerMotionAbsolute {
-								device,
-								time_usec,
-								x_transformed,
-								y_transformed,
-								..
-							} => {
-								let old_position = self.cursor_position;
-								let placements = current_layout(&self.monitors);
-								self.cursor_position =
-									clamp_point_to_layout(&placements, x_transformed, y_transformed);
-								self.emit_cursor_move(
-									PointerMoveEvent {
-										device,
-										time_usec,
-										pointer_type: PointerType::Mouse,
-										old_position,
-										new_position: self.cursor_position,
-									},
-									true,
+									false,
 								);
 							}
-							InputEventPayload::TabletToolAxis {
+						}
+						InputEventPayload::TouchMotion {
+							device,
+							time_usec,
+							contact,
+						} => {
+							let placements = current_layout(&self.monitors);
+							let mut x = contact.x_transformed;
+							let mut y = contact.y_transformed;
+							if x > 1.0 || y > 1.0 {
+								x /= 65535.0;
+								y /= 65535.0;
+							}
+							let max_x = placements
+								.iter()
+								.map(|m| m.x.saturating_add(m.width))
+								.max()
+								.unwrap_or(0)
+								.max(1) as f64;
+							let max_y = placements
+								.iter()
+								.map(|m| m.y.saturating_add(m.height))
+								.max()
+								.unwrap_or(0)
+								.max(1) as f64;
+							let next = clamp_point_to_layout(&placements, x * max_x, y * max_y);
+							self.touch_contacts.insert(contact.id, next);
+							self.emit_touch(TouchEvent::Motion {
 								device,
 								time_usec,
-								axes,
-								..
-							} => {
+								contact: contact.clone(),
+							});
+							if self.primary_touch_id == Some(contact.id) {
 								let old_position = self.cursor_position;
-								let placements = current_layout(&self.monitors);
-								let (mut x, mut y) = (axes.x, axes.y);
-								if (0.0..=1.0).contains(&x) && (0.0..=1.0).contains(&y) {
-									let max_x = placements
-										.iter()
-										.map(|m| m.x.saturating_add(m.width))
-										.max()
-										.unwrap_or(0)
-										.max(1) as f64;
-									let max_y = placements
-										.iter()
-										.map(|m| m.y.saturating_add(m.height))
-										.max()
-										.unwrap_or(0)
-										.max(1) as f64;
-									x *= max_x;
-									y *= max_y;
-								}
-								self.cursor_position = clamp_point_to_layout(&placements, x, y);
+								self.cursor_position = next;
 								self.emit_cursor_move(
 									PointerMoveEvent {
 										device,
 										time_usec,
-										pointer_type: PointerType::Pen,
+										pointer_type: PointerType::Touch,
 										old_position,
 										new_position: self.cursor_position,
 									},
 									false,
 								);
 							}
-							InputEventPayload::TouchDown {
-								device,
-								time_usec,
-								contact,
-							} => {
-								let placements = current_layout(&self.monitors);
-								let mut x = contact.x_transformed;
-								let mut y = contact.y_transformed;
-								if x > 1.0 || y > 1.0 {
-									x /= 65535.0;
-									y /= 65535.0;
-								}
-								let max_x = placements
-									.iter()
-									.map(|m| m.x.saturating_add(m.width))
-									.max()
-									.unwrap_or(0)
-									.max(1) as f64;
-								let max_y = placements
-									.iter()
-									.map(|m| m.y.saturating_add(m.height))
-									.max()
-									.unwrap_or(0)
-									.max(1) as f64;
-								let old_position = self.cursor_position;
-								self.cursor_position =
-									clamp_point_to_layout(&placements, x * max_x, y * max_y);
-								self.touch_contacts
-									.insert(contact.id, self.cursor_position);
-								self.emit_touch(TouchEvent::Down {
-									device,
-									time_usec,
-									contact: contact.clone(),
-								});
-								if self.primary_touch_id.is_none() {
-									self.primary_touch_id = Some(contact.id);
-									self.emit_cursor_move(
-										PointerMoveEvent {
-											device,
-											time_usec,
-											pointer_type: PointerType::Touch,
-											old_position,
-											new_position: self.cursor_position,
-										},
-										false,
-									);
-									self.emit_pointer_down(
-										PointerDownEvent {
-											device,
-											time_usec,
-											pointer_type: PointerType::Touch,
-											button: BTN_LEFT,
-											position: self.cursor_position,
-										},
-										false,
-									);
-								}
-							}
-							InputEventPayload::TouchMotion {
-								device,
-								time_usec,
-								contact,
-							} => {
-								let placements = current_layout(&self.monitors);
-								let mut x = contact.x_transformed;
-								let mut y = contact.y_transformed;
-								if x > 1.0 || y > 1.0 {
-									x /= 65535.0;
-									y /= 65535.0;
-								}
-								let max_x = placements
-									.iter()
-									.map(|m| m.x.saturating_add(m.width))
-									.max()
-									.unwrap_or(0)
-									.max(1) as f64;
-								let max_y = placements
-									.iter()
-									.map(|m| m.y.saturating_add(m.height))
-									.max()
-									.unwrap_or(0)
-									.max(1) as f64;
-								let next =
-									clamp_point_to_layout(&placements, x * max_x, y * max_y);
-								self.touch_contacts.insert(contact.id, next);
-								self.emit_touch(TouchEvent::Motion {
-									device,
-									time_usec,
-									contact: contact.clone(),
-								});
-								if self.primary_touch_id == Some(contact.id) {
-									let old_position = self.cursor_position;
-									self.cursor_position = next;
-									self.emit_cursor_move(
-										PointerMoveEvent {
-											device,
-											time_usec,
-											pointer_type: PointerType::Touch,
-											old_position,
-											new_position: self.cursor_position,
-										},
-										false,
-									);
-								}
-							}
-							InputEventPayload::TouchUp {
+						}
+						InputEventPayload::TouchUp {
+							device,
+							time_usec,
+							contact_id,
+						} => {
+							self.touch_contacts.remove(&contact_id);
+							self.emit_touch(TouchEvent::Up {
 								device,
 								time_usec,
 								contact_id,
-							} => {
-								self.touch_contacts.remove(&contact_id);
-								self.emit_touch(TouchEvent::Up {
-									device,
-									time_usec,
-									contact_id,
-								});
-								if self.primary_touch_id == Some(contact_id) {
-									self.emit_pointer_up(
-										PointerUpEvent {
-											device,
-											time_usec,
-											pointer_type: PointerType::Touch,
-											button: BTN_LEFT,
-											position: self.cursor_position,
-										},
-										false,
-									);
-									self.primary_touch_id = self.touch_contacts.keys().next().copied();
-								}
+							});
+							if self.primary_touch_id == Some(contact_id) {
+								self.emit_pointer_up(
+									PointerUpEvent {
+										device,
+										time_usec,
+										pointer_type: PointerType::Touch,
+										button: BTN_LEFT,
+										position: self.cursor_position,
+									},
+									false,
+								);
+								self.primary_touch_id = self.touch_contacts.keys().next().copied();
 							}
-							InputEventPayload::TouchFrame { time_usec } => {
-								self.emit_touch(TouchEvent::Frame { time_usec });
-							}
-							InputEventPayload::TouchCancel { time_usec } => {
-								self.emit_touch(TouchEvent::Cancel { time_usec });
-								if self.primary_touch_id.take().is_some() {
-									self.emit_pointer_up(
-										PointerUpEvent {
-											device: 0,
-											time_usec,
-											pointer_type: PointerType::Touch,
-											button: BTN_LEFT,
-											position: self.cursor_position,
-										},
-										false,
-									);
-								}
-								self.touch_contacts.clear();
-							}
-							InputEventPayload::GestureSwipeBegin {
-								device,
-								time_usec,
-								fingers,
-							} => self.emit_gesture(GestureEvent::SwipeBegin {
-								device,
-								time_usec,
-								fingers,
-							}),
-							InputEventPayload::GestureSwipeUpdate {
-								device,
-								time_usec,
-								fingers,
-								dx,
-								dy,
-							} => self.emit_gesture(GestureEvent::SwipeUpdate {
-								device,
-								time_usec,
-								fingers,
-								dx,
-								dy,
-							}),
-							InputEventPayload::GestureSwipeEnd {
-								device,
-								time_usec,
-								cancelled,
-							} => self.emit_gesture(GestureEvent::SwipeEnd {
-								device,
-								time_usec,
-								cancelled,
-							}),
-							InputEventPayload::GesturePinchBegin {
-								device,
-								time_usec,
-								fingers,
-							} => self.emit_gesture(GestureEvent::PinchBegin {
-								device,
-								time_usec,
-								fingers,
-							}),
-							InputEventPayload::GesturePinchUpdate {
-								device,
-								time_usec,
-								fingers,
-								dx,
-								dy,
-								scale,
-								rotation,
-							} => self.emit_gesture(GestureEvent::PinchUpdate {
-								device,
-								time_usec,
-								fingers,
-								dx,
-								dy,
-								scale,
-								rotation,
-							}),
-							InputEventPayload::GesturePinchEnd {
-								device,
-								time_usec,
-								cancelled,
-							} => self.emit_gesture(GestureEvent::PinchEnd {
-								device,
-								time_usec,
-								cancelled,
-							}),
-							InputEventPayload::GestureHoldBegin {
-								device,
-								time_usec,
-								fingers,
-							} => self.emit_gesture(GestureEvent::HoldBegin {
-								device,
-								time_usec,
-								fingers,
-							}),
-							InputEventPayload::GestureHoldEnd {
-								device,
-								time_usec,
-								cancelled,
-							} => self.emit_gesture(GestureEvent::HoldEnd {
-								device,
-								time_usec,
-								cancelled,
-							}),
-							_ => (),
 						}
+						InputEventPayload::TouchFrame { time_usec } => {
+							self.emit_touch(TouchEvent::Frame { time_usec });
+						}
+						InputEventPayload::TouchCancel { time_usec } => {
+							self.emit_touch(TouchEvent::Cancel { time_usec });
+							if self.primary_touch_id.take().is_some() {
+								self.emit_pointer_up(
+									PointerUpEvent {
+										device: 0,
+										time_usec,
+										pointer_type: PointerType::Touch,
+										button: BTN_LEFT,
+										position: self.cursor_position,
+									},
+									false,
+								);
+							}
+							self.touch_contacts.clear();
+						}
+						InputEventPayload::GestureSwipeBegin {
+							device,
+							time_usec,
+							fingers,
+						} => self.emit_gesture(GestureEvent::SwipeBegin {
+							device,
+							time_usec,
+							fingers,
+						}),
+						InputEventPayload::GestureSwipeUpdate {
+							device,
+							time_usec,
+							fingers,
+							dx,
+							dy,
+						} => self.emit_gesture(GestureEvent::SwipeUpdate {
+							device,
+							time_usec,
+							fingers,
+							dx,
+							dy,
+						}),
+						InputEventPayload::GestureSwipeEnd {
+							device,
+							time_usec,
+							cancelled,
+						} => self.emit_gesture(GestureEvent::SwipeEnd {
+							device,
+							time_usec,
+							cancelled,
+						}),
+						InputEventPayload::GesturePinchBegin {
+							device,
+							time_usec,
+							fingers,
+						} => self.emit_gesture(GestureEvent::PinchBegin {
+							device,
+							time_usec,
+							fingers,
+						}),
+						InputEventPayload::GesturePinchUpdate {
+							device,
+							time_usec,
+							fingers,
+							dx,
+							dy,
+							scale,
+							rotation,
+						} => self.emit_gesture(GestureEvent::PinchUpdate {
+							device,
+							time_usec,
+							fingers,
+							dx,
+							dy,
+							scale,
+							rotation,
+						}),
+						InputEventPayload::GesturePinchEnd {
+							device,
+							time_usec,
+							cancelled,
+						} => self.emit_gesture(GestureEvent::PinchEnd {
+							device,
+							time_usec,
+							cancelled,
+						}),
+						InputEventPayload::GestureHoldBegin {
+							device,
+							time_usec,
+							fingers,
+						} => self.emit_gesture(GestureEvent::HoldBegin {
+							device,
+							time_usec,
+							fingers,
+						}),
+						InputEventPayload::GestureHoldEnd {
+							device,
+							time_usec,
+							cancelled,
+						} => self.emit_gesture(GestureEvent::HoldEnd {
+							device,
+							time_usec,
+							cancelled,
+						}),
+						_ => (),
 					}
+				}
 				QueuedEvent::Session(ev) => {
 					if let tab_client::SessionEvent::State(session) = ev {
 						self.call_app(|app, ctx| {
@@ -1382,7 +1381,8 @@ impl<A: Application> TabAppFramework<A> {
 	fn render_scheduled(&mut self) -> Result<(), FrameworkError> {
 		let targets: Vec<_> = self.scheduled.drain().collect();
 		for monitor_id in targets {
-			self.stats
+			self
+				.stats
 				.instant_log(&format!("render_scheduled begin monitor={monitor_id}"));
 			let Some((buffer_idx, render_ev)) = (|| {
 				let monitor_rt = self.monitors.get_mut(&monitor_id)?;
@@ -1405,10 +1405,7 @@ impl<A: Application> TabAppFramework<A> {
 			};
 			self.next_acquire_fence = None;
 			self.call_app(|app, ctx| app.on_render(ctx, render_ev.clone()));
-			let acquire_fence = self
-				.next_acquire_fence
-				.as_ref()
-				.map(|fd| fd.as_raw_fd());
+			let acquire_fence = self.next_acquire_fence.as_ref().map(|fd| fd.as_raw_fd());
 			self.stats.instant_log(&format!(
 				"request_buffer send monitor={monitor_id} buffer={} fence={}",
 				buffer_idx as u8,
@@ -1417,29 +1414,31 @@ impl<A: Application> TabAppFramework<A> {
 					.unwrap_or_else(|| "none".to_string())
 			));
 
-				match self.client.request_buffer(&monitor_id, buffer_idx, acquire_fence) {
-					Ok(()) => {
-						self.stats.request_ok += 1;
-						self.stats.instant_log(&format!(
-							"request_buffer ack monitor={monitor_id} buffer={}",
-							buffer_idx as u8
-						));
-						if let Some(monitor_rt) = self.monitors.get_mut(&monitor_id) {
-							monitor_rt.swapchain.mark_busy(buffer_idx);
-							monitor_rt.pending_present[buffer_idx as usize] = true;
-						}
-						if self.render_mode == RenderMode::Eager {
-							// Keep requesting while another client-owned buffer exists.
-							// This avoids deadlocking on the first frame in double-buffering.
-							self.scheduled.insert(monitor_id.clone());
-						}
+			match self
+				.client
+				.request_buffer(&monitor_id, buffer_idx, acquire_fence)
+			{
+				Ok(()) => {
+					self.stats.request_ok += 1;
+					self.stats.instant_log(&format!(
+						"request_buffer ack monitor={monitor_id} buffer={}",
+						buffer_idx as u8
+					));
+					if let Some(monitor_rt) = self.monitors.get_mut(&monitor_id) {
+						monitor_rt.swapchain.mark_busy(buffer_idx);
+						monitor_rt.pending_present[buffer_idx as usize] = true;
 					}
+					if self.render_mode == RenderMode::Eager {
+						// Keep requesting while another client-owned buffer exists.
+						// This avoids deadlocking on the first frame in double-buffering.
+						self.scheduled.insert(monitor_id.clone());
+					}
+				}
 				Err(err) => {
 					self.stats.request_err += 1;
 					self.stats.instant_log(&format!(
 						"request_buffer err monitor={monitor_id} buffer={} err={}",
-						buffer_idx as u8,
-						err
+						buffer_idx as u8, err
 					));
 					if let Some(monitor_rt) = self.monitors.get_mut(&monitor_id) {
 						monitor_rt.swapchain.rollback();
@@ -1685,8 +1684,7 @@ fn fd_readable_now(fd: &OwnedFd) -> Result<bool, FrameworkError> {
 		let rc = unsafe { libc::poll(&mut pfd as *mut libc::pollfd, 1, 0) };
 		if rc > 0 {
 			return Ok(
-				(pfd.revents & (libc::POLLIN | libc::POLLERR | libc::POLLHUP | libc::POLLNVAL))
-					!= 0,
+				(pfd.revents & (libc::POLLIN | libc::POLLERR | libc::POLLHUP | libc::POLLNVAL)) != 0,
 			);
 		}
 		if rc == 0 {

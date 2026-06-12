@@ -8,12 +8,12 @@ use tracing::error;
 
 use crate::{GlContext, GlError, GlVersion};
 
-/// GL-specialized application trait.
+/// OpenGL ES-specialized application trait.
 ///
 /// This mirrors [`tab_app_framework_core::Application`] while exposing
-/// OpenGL helpers through [`GlEventContext`].
+/// OpenGL ES helpers through [`GlEventContext`].
 pub trait GlApplication: Sized + 'static {
-	/// Constructs the application with access to GL initialization state.
+	/// Constructs the application with access to OpenGL ES initialization state.
 	fn init(ctx: &mut GlInitContext) -> anyhow::Result<Self>;
 
 	/// Called after a buffer is acquired and bound as current render target.
@@ -51,12 +51,7 @@ pub trait GlApplication: Sized + 'static {
 	) {
 	}
 	/// Called when a mouse-like device moves the cursor.
-	fn on_mouse_move(
-		&mut self,
-		_ctx: &mut GlEventContext<'_, '_, Self>,
-		_ev: core::MouseMoveEvent,
-	) {
-	}
+	fn on_mouse_move(&mut self, _ctx: &mut GlEventContext<'_, '_, Self>, _ev: core::MouseMoveEvent) {}
 	/// Called when any pointer device produces a down transition.
 	fn on_pointer_down(
 		&mut self,
@@ -65,26 +60,11 @@ pub trait GlApplication: Sized + 'static {
 	) {
 	}
 	/// Called when any pointer device produces an up transition.
-	fn on_pointer_up(
-		&mut self,
-		_ctx: &mut GlEventContext<'_, '_, Self>,
-		_ev: core::PointerUpEvent,
-	) {
-	}
+	fn on_pointer_up(&mut self, _ctx: &mut GlEventContext<'_, '_, Self>, _ev: core::PointerUpEvent) {}
 	/// Called when a mouse-like device produces a down transition.
-	fn on_mouse_down(
-		&mut self,
-		_ctx: &mut GlEventContext<'_, '_, Self>,
-		_ev: core::MouseDownEvent,
-	) {
-	}
+	fn on_mouse_down(&mut self, _ctx: &mut GlEventContext<'_, '_, Self>, _ev: core::MouseDownEvent) {}
 	/// Called when a mouse-like device produces an up transition.
-	fn on_mouse_up(
-		&mut self,
-		_ctx: &mut GlEventContext<'_, '_, Self>,
-		_ev: core::MouseUpEvent,
-	) {
-	}
+	fn on_mouse_up(&mut self, _ctx: &mut GlEventContext<'_, '_, Self>, _ev: core::MouseUpEvent) {}
 	/// Called for multitouch contact lifecycle events.
 	fn on_touch(&mut self, _ctx: &mut GlEventContext<'_, '_, Self>, _ev: core::TouchEvent) {}
 	/// Called for high-level multi-finger gesture events.
@@ -107,12 +87,12 @@ impl GlInitContext {
 		Self { gl }
 	}
 
-	/// Returns immutable access to the GL context.
+	/// Returns immutable access to the OpenGL ES context.
 	pub fn gl(&self) -> &GlContext {
 		&self.gl
 	}
 
-	/// Returns mutable access to the GL context.
+	/// Returns mutable access to the OpenGL ES context.
 	pub fn gl_mut(&mut self) -> &mut GlContext {
 		&mut self.gl
 	}
@@ -122,7 +102,7 @@ impl GlInitContext {
 	}
 }
 
-/// Callback context for GL applications.
+/// Callback context for OpenGL ES applications.
 pub struct GlEventContext<'c, 'g, A: GlApplication> {
 	core: &'g mut core::Context<'c, GlBridge<A>>,
 	gl: &'g mut GlContext,
@@ -189,12 +169,12 @@ impl<'c, 'g, A: GlApplication> GlEventContext<'c, 'g, A> {
 		self.core.cursor_position()
 	}
 
-	/// Returns immutable access to GL context.
+	/// Returns immutable access to the OpenGL ES context.
 	pub fn gl(&self) -> &GlContext {
 		self.gl
 	}
 
-	/// Returns mutable access to GL context.
+	/// Returns mutable access to the OpenGL ES context.
 	pub fn gl_mut(&mut self) -> &mut GlContext {
 		self.gl
 	}
@@ -239,13 +219,13 @@ impl<'c, 'g, A: GlApplication> GlEventContext<'c, 'g, A> {
 	}
 }
 
-/// High-level GL framework wrapper around the core runtime.
+/// High-level OpenGL ES framework wrapper around the core runtime.
 pub struct GlTabAppFramework<A: GlApplication> {
 	inner: core::TabAppFramework<GlBridge<A>>,
 }
 
 impl<A: GlApplication> GlTabAppFramework<A> {
-	/// Initializes a GL application runtime.
+	/// Initializes an OpenGL ES application runtime.
 	pub fn init(configure: impl FnOnce(&mut core::Config)) -> Result<Self, core::FrameworkError> {
 		let inner = core::TabAppFramework::<GlBridge<A>>::init(configure)?;
 		Ok(Self { inner })
@@ -265,10 +245,10 @@ struct GlBridge<A: GlApplication> {
 
 impl<A: GlApplication> core::Application for GlBridge<A> {
 	fn init(ctx: &mut core::InitContext<Self>) -> anyhow::Result<Self> {
-		let (major, minor) = ctx.config().requested_opengl_version();
+		let (major, minor) = ctx.config().requested_opengl_es_version();
 		let version = GlVersion { major, minor };
 		let gl = GlContext::new(version, ctx.config().render_node_path())
-			.context("failed to create GL context")?;
+			.context("failed to create OpenGL ES context")?;
 		let mut init = GlInitContext::new(gl);
 		let app = A::init(&mut init)?;
 		let xkb = XkbEngine::new().context("failed to initialize xkb engine")?;

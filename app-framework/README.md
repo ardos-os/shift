@@ -5,7 +5,7 @@
 It gives you a GLFW-like developer experience:
 - initialize an app
 - receive render/input/session callbacks
-- render with OpenGL
+- render with OpenGL ES
 - handle monitors and cursor layout
 - create and switch sessions from app code
 
@@ -16,7 +16,7 @@ It gives you a GLFW-like developer experience:
 - `tab-app-framework-core`:
   Core runtime and callback/event model.
 - `tab-app-framework-gl`:
-  OpenGL integration and render-target setup.
+  OpenGL ES integration and render-target setup.
 - `tab-app-framework-xkb`:
   Keyboard composition helpers.
 - `monitor-layout-engine`:
@@ -54,7 +54,7 @@ impl GlApplication for App {
 
 fn main() -> anyhow::Result<()> {
     let mut app = GlTabAppFramework::<App>::init(|config: &mut Config| {
-        config.opengl_version(3, 3);
+        config.opengl_es_version(3, 0);
         config.set_render_mode(RenderMode::Eager);
     })?;
     app.run()
@@ -68,7 +68,7 @@ The framework expects `SHIFT_SESSION_TOKEN` in the environment by default.
 You can customize:
 - socket path (`Config::set_socket_path`)
 - render node (`Config::set_render_node_path`)
-- OpenGL version (`Config::opengl_version`)
+- OpenGL ES version (`Config::opengl_es_version`)
 - render mode (`Config::set_render_mode`)
 
 ## Event model

@@ -1,4 +1,4 @@
-//! OpenGL renderer integration for `tab-app-framework`.
+//! OpenGL ES renderer integration for `tab-app-framework`.
 //! Provides EGL/GBM context setup and DMA-BUF import helpers.
 
 mod egl;
@@ -12,14 +12,14 @@ use std::path::{Path, PathBuf};
 use std::ptr;
 
 use gbm::AsRaw as _;
-use gbm::Device as GbmDevice;
+use gbm::{BufferObjectFlags, Device as GbmDevice, Format};
 use glow::HasContext;
 use thiserror::Error;
 
 pub use framework::{GlApplication, GlEventContext, GlInitContext, GlTabAppFramework};
 pub use tab_app_framework_core::{SessionCreatedPayload, SessionInfo, SessionRole};
 
-/// Requested OpenGL/OpenGL ES version.
+/// Requested OpenGL ES version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GlVersion {
 	/// Major version.
@@ -28,13 +28,15 @@ pub struct GlVersion {
 	pub minor: u8,
 }
 
-/// Errors produced by GL/EGL initialization and rendering helpers.
+/// Errors produced by OpenGL ES/EGL initialization and rendering helpers.
 #[derive(Debug, Error)]
 pub enum GlError {
 	#[error("failed to open EGL library: {0}")]
 	LoadEglLibrary(String),
-	#[error("failed to open GL library: {0}")]
-	LoadGlLibrary(String),
+	#[error("failed to open OpenGL ES library: {0}")]
+	LoadGlesLibrary(String),
+	#[error("unsupported OpenGL ES version {major}.{minor}; supported versions are 2.0 and 3.0-3.2")]
+	UnsupportedVersion { major: u8, minor: u8 },
 	#[error("invalid function name: {0}")]
 	InvalidFunctionName(String),
 	#[error("failed to open render node {path}: {source}")]
@@ -56,8 +58,6 @@ pub enum GlError {
 	MissingConfig,
 	#[error("eglCreateContext failed (error={0:#X})")]
 	CreateContextFailed(i32),
-	#[error("failed to create EGL context for OpenGL/OpenGL ES: {0}")]
-	ContextCreationFailed(String),
 	#[error("eglMakeCurrent failed (error={0:#X})")]
 	MakeCurrentFailed(i32),
 	#[error(
@@ -78,14 +78,14 @@ pub enum GlError {
 
 type GlEglImageTargetTexture2DOes = unsafe extern "system" fn(u32, *const c_void);
 
-/// OpenGL/EGL context and DMA-BUF render-target cache.
+/// OpenGL ES/EGL context and DMA-BUF render-target cache.
 pub struct GlContext {
 	egl: egl::Egl,
 	display: egl::types::EGLDisplay,
 	context: egl::types::EGLContext,
 	_gbm_device: GbmDevice<std::fs::File>,
 	egl_lib: libloading::Library,
-	gl_lib: libloading::Library,
+	gles_lib: libloading::Library,
 	glow: glow::Context,
 	version: GlVersion,
 	egl_image_target_texture_2d_oes: GlEglImageTargetTexture2DOes,
@@ -95,14 +95,15 @@ pub struct GlContext {
 impl GlContext {
 	/// Creates a surfaceless EGL context backed by a GBM render node.
 	pub fn new(version: GlVersion, render_node: Option<&Path>) -> Result<Self, GlError> {
+		validate_version(version)?;
+
 		let egl_lib = unsafe { libloading::Library::new("libEGL.so.1") }
 			.map_err(|e| GlError::LoadEglLibrary(e.to_string()))?;
-		let gl_lib = unsafe { libloading::Library::new("libGL.so.1") }
-			.map_err(|e| GlError::LoadGlLibrary(e.to_string()))?;
+		let gles_lib = unsafe { libloading::Library::new("libGLESv2.so.2") }
+			.map_err(|e| GlError::LoadGlesLibrary(e.to_string()))?;
 
 		// Bootstrap with dlsym first so we can use eglGetProcAddress for extension entrypoints.
-		let egl_boot =
-			egl::Egl::load_with(|name| load_symbol(&egl_lib, name).unwrap_or(ptr::null()));
+		let egl_boot = egl::Egl::load_with(|name| load_symbol(&egl_lib, name).unwrap_or(ptr::null()));
 
 		let gbm_device = open_render_node_gbm_device(render_node)?;
 		const EGL_PLATFORM_GBM_KHR: u32 = 0x31D7;
@@ -146,87 +147,54 @@ impl GlContext {
 				return ptr::null();
 			};
 			let ptr = unsafe { egl_boot.GetProcAddress(c_name.as_ptr()) };
-			if ptr.is_null() { ptr::null() } else { ptr.cast() }
+			if ptr.is_null() {
+				ptr::null()
+			} else {
+				ptr.cast()
+			}
 		});
 
-		const EGL_CONTEXT_MAJOR_VERSION: i32 = 0x3098;
-		const EGL_CONTEXT_MINOR_VERSION: i32 = 0x30FB;
+		const EGL_CONTEXT_CLIENT_VERSION: i32 = 0x3098;
+		const EGL_CONTEXT_MINOR_VERSION_KHR: i32 = 0x30FB;
 		const EGL_OPENGL_ES2_BIT: i32 = 0x0004;
 		const EGL_OPENGL_ES3_BIT_KHR: i32 = 0x0040;
 
-		let mut last_error = String::new();
-		let (config, context) = if unsafe { egl.BindAPI(egl::OPENGL_API as u32) } != 0 {
-			let gl_config = choose_config(&egl, display, egl::OPENGL_BIT as i32)?;
-			let gl_ctx_attribs = [
-				EGL_CONTEXT_MAJOR_VERSION,
+		if unsafe { egl.BindAPI(egl::OPENGL_ES_API as u32) } == 0 {
+			return Err(GlError::BindApiFailed(unsafe { egl.GetError() }));
+		}
+
+		let renderable_type = if version.major >= 3 {
+			EGL_OPENGL_ES3_BIT_KHR
+		} else {
+			EGL_OPENGL_ES2_BIT
+		};
+		let config = choose_config(&egl, display, renderable_type)?;
+		let context_attribs = if version.minor == 0 {
+			vec![
+				EGL_CONTEXT_CLIENT_VERSION,
 				version.major as i32,
-				EGL_CONTEXT_MINOR_VERSION,
+				egl::NONE as i32,
+			]
+		} else {
+			vec![
+				EGL_CONTEXT_CLIENT_VERSION,
+				version.major as i32,
+				EGL_CONTEXT_MINOR_VERSION_KHR,
 				version.minor as i32,
 				egl::NONE as i32,
-			];
-			let context = unsafe {
-				egl.CreateContext(
-					display,
-					gl_config,
-					egl::NO_CONTEXT,
-					gl_ctx_attribs.as_ptr() as *const _,
-				)
-			};
-			if context.is_null() {
-				last_error = format!("OpenGL context failed eglError={:#X}", unsafe {
-					egl.GetError()
-				});
-				(ptr::null(), ptr::null())
-			} else {
-				(gl_config, context)
-			}
-		} else {
-			last_error = format!("OpenGL BindAPI failed eglError={:#X}", unsafe {
-				egl.GetError()
-			});
-			(ptr::null(), ptr::null())
+			]
 		};
-
-		let (_config, context) = if context.is_null() {
-			if unsafe { egl.BindAPI(egl::OPENGL_ES_API as u32) } == 0 {
-				return Err(GlError::ContextCreationFailed(format!(
-					"{last_error}; OpenGL ES BindAPI failed eglError={:#X}",
-					unsafe { egl.GetError() }
-				)));
-			}
-
-			let es_bits = if version.major >= 3 {
-				EGL_OPENGL_ES3_BIT_KHR
-			} else {
-				EGL_OPENGL_ES2_BIT
-			};
-			let es_config = choose_config(&egl, display, es_bits)?;
-			let es_major = version.major.max(2);
-			let es_ctx_attribs = [
-				EGL_CONTEXT_MAJOR_VERSION,
-				es_major as i32,
-				EGL_CONTEXT_MINOR_VERSION,
-				version.minor as i32,
-				egl::NONE as i32,
-			];
-			let es_context = unsafe {
-				egl.CreateContext(
-					display,
-					es_config,
-					egl::NO_CONTEXT,
-					es_ctx_attribs.as_ptr() as *const _,
-				)
-			};
-			if es_context.is_null() {
-				return Err(GlError::ContextCreationFailed(format!(
-					"{last_error}; OpenGL ES context failed eglError={:#X}",
-					unsafe { egl.GetError() }
-				)));
-			}
-			(es_config, es_context)
-		} else {
-			(config, context)
+		let context = unsafe {
+			egl.CreateContext(
+				display,
+				config,
+				egl::NO_CONTEXT,
+				context_attribs.as_ptr() as *const _,
+			)
 		};
+		if context.is_null() {
+			return Err(GlError::CreateContextFailed(unsafe { egl.GetError() }));
+		}
 
 		let make_current_ok =
 			unsafe { egl.MakeCurrent(display, egl::NO_SURFACE, egl::NO_SURFACE, context) };
@@ -240,14 +208,14 @@ impl GlContext {
 			return Err(GlError::MissingEglImageExt);
 		}
 
-		let image_target_ptr = load_proc_raw(&egl, &egl_lib, &gl_lib, "glEGLImageTargetTexture2DOES")
+		let image_target_ptr = load_proc_raw(&egl, &egl_lib, &gles_lib, "glEGLImageTargetTexture2DOES")
 			.ok_or(GlError::MissingGlEglImageTarget)?;
 		let egl_image_target_texture_2d_oes: GlEglImageTargetTexture2DOes =
 			unsafe { std::mem::transmute(image_target_ptr) };
 
 		let glow = unsafe {
 			glow::Context::from_loader_function(|name| {
-				load_proc_raw(&egl, &egl_lib, &gl_lib, name).unwrap_or(ptr::null()) as *const _
+				load_proc_raw(&egl, &egl_lib, &gles_lib, name).unwrap_or(ptr::null()) as *const _
 			})
 		};
 
@@ -257,7 +225,7 @@ impl GlContext {
 			context,
 			_gbm_device: gbm_device,
 			egl_lib,
-			gl_lib,
+			gles_lib,
 			glow,
 			version,
 			egl_image_target_texture_2d_oes,
@@ -265,7 +233,7 @@ impl GlContext {
 		})
 	}
 
-	/// Returns the actual GL version requested for this context.
+	/// Returns the OpenGL ES version requested for this context.
 	pub fn version(&self) -> GlVersion {
 		self.version
 	}
@@ -283,12 +251,12 @@ impl GlContext {
 		Ok(())
 	}
 
-	/// Resolves an OpenGL/EGL symbol by name.
+	/// Resolves an OpenGL ES/EGL symbol by name.
 	pub fn load_proc(&self, name: &str) -> Result<*const c_void, GlError> {
 		if name.as_bytes().contains(&0) {
 			return Err(GlError::InvalidFunctionName(name.to_string()));
 		}
-		Ok(load_proc_raw(&self.egl, &self.egl_lib, &self.gl_lib, name).unwrap_or(ptr::null()))
+		Ok(load_proc_raw(&self.egl, &self.egl_lib, &self.gles_lib, name).unwrap_or(ptr::null()))
 	}
 
 	/// Returns the underlying `glow` context.
@@ -323,7 +291,11 @@ impl GlContext {
 		}
 
 		unsafe { self.glow.flush() };
-		let fd = unsafe { self.egl.DupNativeFenceFDANDROID(self.display, sync as egl::types::EGLSyncKHR) };
+		let fd = unsafe {
+			self
+				.egl
+				.DupNativeFenceFDANDROID(self.display, sync as egl::types::EGLSyncKHR)
+		};
 		unsafe {
 			self.egl.DestroySync(self.display, sync);
 		}
@@ -546,6 +518,25 @@ const DEFAULT_RENDER_NODES: &[&str] = &[
 	"/dev/dri/renderD135",
 ];
 
+const DEFAULT_PRIMARY_NODES: &[&str] = &[
+	"/dev/dri/card0",
+	"/dev/dri/card1",
+	"/dev/dri/card2",
+	"/dev/dri/card3",
+	"/dev/dri/card4",
+	"/dev/dri/card5",
+	"/dev/dri/card6",
+	"/dev/dri/card7",
+	"/dev/dri/card8",
+	"/dev/dri/card9",
+	"/dev/dri/card10",
+	"/dev/dri/card11",
+	"/dev/dri/card12",
+	"/dev/dri/card13",
+	"/dev/dri/card14",
+	"/dev/dri/card15",
+];
+
 fn open_render_node_gbm_device(
 	configured: Option<&Path>,
 ) -> Result<GbmDevice<std::fs::File>, GlError> {
@@ -553,7 +544,27 @@ fn open_render_node_gbm_device(
 	for candidate in render_node_candidates(configured) {
 		match OpenOptions::new().read(true).write(true).open(&candidate) {
 			Ok(file) => match GbmDevice::new(file) {
-				Ok(device) => return Ok(device),
+				Ok(device) => {
+					if let Err(source) = probe_buffer_allocation(&device) {
+						tracing::warn!(
+							path = %candidate.display(),
+							backend = device.backend_name(),
+							error = %source,
+							"rejecting EGL GBM device"
+						);
+						last_error = Some(GlError::GbmInit(format!(
+							"{} cannot allocate rendering buffers: {source}",
+							candidate.display()
+						)));
+						continue;
+					}
+					tracing::info!(
+						path = %candidate.display(),
+						backend = device.backend_name(),
+						"selected EGL GBM device"
+					);
+					return Ok(device);
+				}
 				Err(err) => {
 					last_error = Some(GlError::GbmInit(err.to_string()));
 				}
@@ -577,15 +588,23 @@ fn render_node_candidates(configured: Option<&Path>) -> Vec<PathBuf> {
 	} else {
 		DEFAULT_RENDER_NODES
 			.iter()
+			.chain(DEFAULT_PRIMARY_NODES.iter())
 			.map(|p| PathBuf::from(p))
 			.collect()
 	}
 }
 
+fn probe_buffer_allocation(device: &GbmDevice<std::fs::File>) -> std::io::Result<()> {
+	let probe =
+		device.create_buffer_object::<()>(64, 64, Format::Xrgb8888, BufferObjectFlags::RENDERING)?;
+	drop(probe);
+	Ok(())
+}
+
 fn load_proc_raw(
 	egl: &egl::Egl,
 	egl_lib: &libloading::Library,
-	gl_lib: &libloading::Library,
+	gles_lib: &libloading::Library,
 	name: &str,
 ) -> Option<*const c_void> {
 	let c_name = CString::new(name).ok()?;
@@ -593,13 +612,45 @@ fn load_proc_raw(
 	if !egl_ptr.is_null() {
 		return Some(egl_ptr.cast());
 	}
-	if let Some(sym) = load_symbol(gl_lib, name) {
+	if let Some(sym) = load_symbol(gles_lib, name) {
 		return Some(sym);
 	}
 	if let Some(sym) = load_symbol(egl_lib, name) {
 		return Some(sym);
 	}
 	None
+}
+
+fn validate_version(version: GlVersion) -> Result<(), GlError> {
+	if (version.major == 2 && version.minor == 0) || (version.major == 3 && version.minor <= 2) {
+		return Ok(());
+	}
+	Err(GlError::UnsupportedVersion {
+		major: version.major,
+		minor: version.minor,
+	})
+}
+
+#[cfg(test)]
+mod tests {
+	use super::{GlError, GlVersion, validate_version};
+
+	#[test]
+	fn accepts_supported_opengl_es_versions() {
+		for (major, minor) in [(2, 0), (3, 0), (3, 1), (3, 2)] {
+			assert!(validate_version(GlVersion { major, minor }).is_ok());
+		}
+	}
+
+	#[test]
+	fn rejects_desktop_and_invalid_opengl_es_versions() {
+		for (major, minor) in [(1, 1), (2, 1), (3, 3), (4, 0)] {
+			assert!(matches!(
+				validate_version(GlVersion { major, minor }),
+				Err(GlError::UnsupportedVersion { .. })
+			));
+		}
+	}
 }
 
 fn choose_config(

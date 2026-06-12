@@ -55,19 +55,11 @@ impl GlApplication for App {
 		draw_cursor_circle(gl, ev.width, ev.height, local_x as _, local_y as _, radius);
 	}
 
-	fn on_mouse_down(
-		&mut self,
-		_ctx: &mut GlEventContext<'_, '_, Self>,
-		_ev: MouseDownEvent,
-	) {
+	fn on_mouse_down(&mut self, _ctx: &mut GlEventContext<'_, '_, Self>, _ev: MouseDownEvent) {
 		self.left_down = true;
 	}
 
-	fn on_mouse_up(
-		&mut self,
-		_ctx: &mut GlEventContext<'_, '_, Self>,
-		_ev: MouseUpEvent,
-	) {
+	fn on_mouse_up(&mut self, _ctx: &mut GlEventContext<'_, '_, Self>, _ev: MouseUpEvent) {
 		self.left_down = false;
 	}
 }
@@ -115,7 +107,7 @@ fn main() -> anyhow::Result<()> {
 
 fn run() -> anyhow::Result<()> {
 	let mut app = GlTabAppFramework::<App>::init(|config: &mut Config| {
-		config.opengl_version(3, 3);
+		config.opengl_es_version(3, 0);
 		config.set_render_mode(RenderMode::Eager);
 	})?;
 	app.run()?;

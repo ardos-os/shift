@@ -24,6 +24,25 @@ const DEFAULT_RENDER_NODES: &[&str] = &[
 	"/dev/dri/renderD135",
 ];
 
+const DEFAULT_PRIMARY_NODES: &[&str] = &[
+	"/dev/dri/card0",
+	"/dev/dri/card1",
+	"/dev/dri/card2",
+	"/dev/dri/card3",
+	"/dev/dri/card4",
+	"/dev/dri/card5",
+	"/dev/dri/card6",
+	"/dev/dri/card7",
+	"/dev/dri/card8",
+	"/dev/dri/card9",
+	"/dev/dri/card10",
+	"/dev/dri/card11",
+	"/dev/dri/card12",
+	"/dev/dri/card13",
+	"/dev/dri/card14",
+	"/dev/dri/card15",
+];
+
 pub struct GbmAllocator {
 	device: Device<std::fs::File>,
 	format: Format,
@@ -38,6 +57,24 @@ impl GbmAllocator {
 			match OpenOptions::new().read(true).write(true).open(&candidate) {
 				Ok(file) => match Device::new(file) {
 					Ok(device) => {
+						if let Err(source) = probe_buffer_allocation(&device) {
+							tracing::warn!(
+								path = %candidate.display(),
+								backend = device.backend_name(),
+								error = %source,
+								"rejecting GBM device"
+							);
+							last_error = Some(TabClientError::GbmInit(format!(
+								"{} cannot allocate rendering buffers: {source}",
+								candidate.display()
+							)));
+							continue;
+						}
+						tracing::info!(
+							path = %candidate.display(),
+							backend = device.backend_name(),
+							"selected GBM device"
+						);
 						return Ok(Self {
 							device,
 							format: Format::Xrgb8888,
@@ -102,8 +139,16 @@ impl GbmAllocator {
 		} else {
 			DEFAULT_RENDER_NODES
 				.iter()
+				.chain(DEFAULT_PRIMARY_NODES.iter())
 				.map(|p| PathBuf::from(p))
 				.collect()
 		}
 	}
+}
+
+fn probe_buffer_allocation(device: &Device<std::fs::File>) -> std::io::Result<()> {
+	let probe =
+		device.create_buffer_object::<()>(64, 64, Format::Xrgb8888, BufferObjectFlags::RENDERING)?;
+	drop(probe);
+	Ok(())
 }

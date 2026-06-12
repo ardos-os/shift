@@ -56,7 +56,6 @@ async fn main() {
 			return;
 		}
 	};
-	server.add_initial_session();
 	tracing::info!("starting ShiftServer on {:?}", socket_path);
 
 	// ---- create rendering ----
