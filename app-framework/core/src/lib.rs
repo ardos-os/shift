@@ -765,11 +765,10 @@ impl<A: Application> TabAppFramework<A> {
 				.unwrap_or((0.0, 0.0));
 			clamp_point_to_layout(&placements, seed.0, seed.1)
 		};
-		let scheduled = if cfg.render_mode == RenderMode::Eager {
-			monitors.keys().cloned().collect()
-		} else {
-			HashSet::new()
-		};
+		// Even in scheduled mode the application needs one initial frame for every
+		// monitor that already exists before callbacks are attached. After that first
+		// render, scheduled mode only renders when the app explicitly schedules frames.
+		let scheduled = monitors.keys().cloned().collect();
 
 		Ok(Self {
 			app,

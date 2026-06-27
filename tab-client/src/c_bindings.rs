@@ -1689,7 +1689,10 @@ pub unsafe extern "C" fn tab_client_session_switch(
 		};
 		let animation = cstring_to_string(animation);
 		let duration = Duration::from_millis(duration_ms as u64);
-		if let Err(err) = handle.client.switch_session(&session_id, animation, duration) {
+		if let Err(err) = handle
+			.client
+			.switch_session(&session_id, animation, duration)
+		{
 			handle.record_error(err);
 			return false;
 		}

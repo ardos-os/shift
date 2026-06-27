@@ -14,7 +14,11 @@ use futures::future::select_all;
 use tab_protocol::TabMessageFrame;
 use thiserror::Error;
 use tokio::{
-	io::unix::AsyncFd, net::{UnixListener, UnixStream, unix::SocketAddr}, sync::mpsc::error::TryRecvError, task::JoinHandle as TokioJoinHandle, time::Instant
+	io::unix::AsyncFd,
+	net::{UnixListener, UnixStream, unix::SocketAddr},
+	sync::mpsc::error::TryRecvError,
+	task::JoinHandle as TokioJoinHandle,
+	time::Instant,
 };
 use tracing::error;
 
@@ -380,7 +384,7 @@ impl ShiftServer {
 				std::path::Path::new(tibs)
 					.is_file()
 					.then(|| Command::new(tibs))
-		});
+			});
 		if let Some(cmd) = admin_command.as_mut() {
 			cmd.env("SHIFT_SESSION_TOKEN", token.to_string());
 			cmd.env("HOME", "/tmp");

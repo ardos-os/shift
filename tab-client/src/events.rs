@@ -6,10 +6,7 @@ use tab_protocol::{BufferIndex, InputEventPayload, SessionInfo};
 #[derive(Debug, Clone)]
 pub enum MonitorEvent {
 	Added(MonitorState),
-	Removed {
-		monitor_id: String,
-		name: String,
-	},
+	Removed { monitor_id: String, name: String },
 }
 
 /// Rendering-related notifications.

@@ -27,8 +27,8 @@ use tab_protocol::{
 	AuthErrorPayload, AuthOkPayload, AuthPayload, BufferIndex, BufferReleasePayload,
 	BufferRequestAckPayload, InputEventPayload, MonitorInfo, SessionActivePayload,
 	SessionAwakePayload, SessionCreatePayload, SessionCreatedPayload, SessionInfo,
-	SessionReadyPayload, SessionRole, SessionSleepPayload, SessionStatePayload,
-	SessionSwitchPayload, TabMessage,
+	SessionReadyPayload, SessionRole, SessionSleepPayload, SessionStatePayload, SessionSwitchPayload,
+	TabMessage,
 };
 
 use crate::gbm_allocator::GbmAllocator;
@@ -162,8 +162,7 @@ impl TabClient {
 		display_name: Option<String>,
 	) -> Result<SessionCreatedPayload, TabClientError> {
 		let payload = SessionCreatePayload { role, display_name };
-		TabMessageFrame::json(message_header::SESSION_CREATE, payload)
-			.encode_and_send(&self.socket)?;
+		TabMessageFrame::json(message_header::SESSION_CREATE, payload).encode_and_send(&self.socket)?;
 		self.wait_for_session_created()
 	}
 
@@ -178,8 +177,7 @@ impl TabClient {
 			animation,
 			duration,
 		};
-		TabMessageFrame::json(message_header::SESSION_SWITCH, payload)
-			.encode_and_send(&self.socket)?;
+		TabMessageFrame::json(message_header::SESSION_SWITCH, payload).encode_and_send(&self.socket)?;
 		Ok(())
 	}
 
