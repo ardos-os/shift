@@ -29,9 +29,9 @@ use input::{
 	},
 };
 use tab_protocol::{
-	AxisOrientation, AxisSource, ButtonState, InputEventPayload, KeyState, SwitchState, SwitchType,
-	TabletTool, TabletToolAxes, TabletToolCapability, TabletToolType, TipState as ProtoTipState,
-	TouchContact,
+	AxisOrientation, AxisPhase, AxisSource, ButtonState, InputEventPayload, KeyState, SwitchState,
+	SwitchType, TabletTool, TabletToolAxes, TabletToolCapability, TabletToolType,
+	TipState as ProtoTipState, TouchContact,
 };
 use thiserror::Error;
 
@@ -303,15 +303,21 @@ fn map_pointer_event(event: PointerEvent) -> Option<InputEventPayload> {
 				pointer::AxisSource::Continuous => AxisSource::Continuous,
 				pointer::AxisSource::WheelTilt => AxisSource::WheelTilt,
 			};
+			let delta = axis.axis_value(axis_selector);
 			Some(InputEventPayload::PointerAxis {
 				device: device_id(&axis),
 				time_usec: axis.time_usec(),
 				orientation,
-				delta: axis.axis_value(axis_selector),
+				delta,
 				delta_discrete: axis
 					.axis_value_discrete(axis_selector)
 					.map(|v| v.round() as i32),
 				source,
+				phase: if delta == 0.0 {
+					AxisPhase::Ended
+				} else {
+					AxisPhase::Moved
+				},
 			})
 		}
 		_ => None,

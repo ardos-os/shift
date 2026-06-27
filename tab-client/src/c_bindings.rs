@@ -20,8 +20,8 @@ use crate::{
 	swapchain::TabSwapchain,
 };
 use tab_protocol::{
-	AxisOrientation, AxisSource, BufferIndex, ButtonState, InputEventPayload, KeyState, SwitchState,
-	SwitchType, TipState,
+	AxisOrientation, AxisPhase, AxisSource, BufferIndex, ButtonState, InputEventPayload, KeyState,
+	SwitchState, SwitchType, TipState,
 };
 
 #[repr(C)]
@@ -208,6 +208,7 @@ pub struct TabInputPointerAxis {
 	pub delta: f64,
 	pub delta_discrete: i32,
 	pub source: u32,
+	pub phase: u32,
 }
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -692,6 +693,15 @@ fn tab_axis_source(source: AxisSource) -> u32 {
 	}
 }
 
+fn tab_axis_phase(phase: AxisPhase) -> u32 {
+	match phase {
+		AxisPhase::Started => 0,
+		AxisPhase::Moved => 1,
+		AxisPhase::Ended => 2,
+		AxisPhase::Cancelled => 3,
+	}
+}
+
 fn tab_switch_type(switch: SwitchType) -> u32 {
 	match switch {
 		SwitchType::Lid => 0,
@@ -805,6 +815,7 @@ fn tab_input_from_payload(payload: &InputEventPayload) -> TabInputEvent {
 			delta,
 			delta_discrete,
 			source,
+			phase,
 		} => TabInputEvent {
 			kind: TabInputEventKind::TAB_INPUT_KIND_POINTER_AXIS,
 			data: TabInputEventData {
@@ -815,6 +826,7 @@ fn tab_input_from_payload(payload: &InputEventPayload) -> TabInputEvent {
 					delta: *delta,
 					delta_discrete: delta_discrete.unwrap_or(0),
 					source: tab_axis_source(source.clone()),
+					phase: tab_axis_phase(phase.clone()),
 				},
 			},
 		},
@@ -1601,7 +1613,7 @@ pub unsafe extern "C" fn tab_client_get_server_name(_handle: *mut TabClientHandl
 pub unsafe extern "C" fn tab_client_get_protocol_name(
 	_handle: *mut TabClientHandle,
 ) -> *mut c_char {
-	ptr::null_mut()
+	dup_string(tab_protocol::PROTOCOL_VERSION)
 }
 
 #[unsafe(no_mangle)]

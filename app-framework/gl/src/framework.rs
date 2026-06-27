@@ -61,6 +61,13 @@ pub trait GlApplication: Sized + 'static {
 	}
 	/// Called when any pointer device produces an up transition.
 	fn on_pointer_up(&mut self, _ctx: &mut GlEventContext<'_, '_, Self>, _ev: core::PointerUpEvent) {}
+	/// Called when a pointer axis changes, e.g. mouse wheel or touchpad scroll.
+	fn on_pointer_axis(
+		&mut self,
+		_ctx: &mut GlEventContext<'_, '_, Self>,
+		_ev: core::PointerAxisEvent,
+	) {
+	}
 	/// Called when a mouse-like device produces a down transition.
 	fn on_mouse_down(&mut self, _ctx: &mut GlEventContext<'_, '_, Self>, _ev: core::MouseDownEvent) {}
 	/// Called when a mouse-like device produces an up transition.
@@ -375,6 +382,14 @@ impl<A: GlApplication> core::Application for GlBridge<A> {
 			gl: &mut self.gl,
 		};
 		self.app.on_pointer_up(&mut ctx, ev);
+	}
+
+	fn on_pointer_axis(&mut self, ctx: &mut core::Context<Self>, ev: core::PointerAxisEvent) {
+		let mut ctx = GlEventContext {
+			core: ctx,
+			gl: &mut self.gl,
+		};
+		self.app.on_pointer_axis(&mut ctx, ev);
 	}
 
 	fn on_mouse_down(&mut self, ctx: &mut core::Context<Self>, ev: core::MouseDownEvent) {

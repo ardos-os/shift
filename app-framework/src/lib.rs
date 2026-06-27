@@ -14,11 +14,12 @@ pub use tab_app_framework_xkb as xkb;
 
 /// Re-exported core runtime types.
 pub use tab_app_framework_core::{
-	Application, CharEvent, Config, Context, FdReadyEvent, FrameworkError, GestureEvent, InitContext,
-	InputEvent, KeyEvent, Monitor, MonitorAddedEvent, MonitorRemovedEvent, MouseDownEvent,
-	MouseMoveEvent, MouseUpEvent, PointerDownEvent, PointerMoveEvent, PointerType, PointerUpEvent,
-	PresentEvent, RenderEvent, RenderMode, SessionCreatedPayload, SessionEvent, SessionInfo,
-	SessionRole, TabAppFramework, TouchEvent,
+	Application, AxisOrientation, AxisPhase, AxisSource, CharEvent, Config, Context, FdReadyEvent,
+	FrameworkError, GestureEvent, InitContext, InputEvent, KeyEvent, Monitor, MonitorAddedEvent,
+	MonitorRemovedEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PointerAxisEvent,
+	PointerDownEvent, PointerMoveEvent, PointerType, PointerUpEvent, PresentEvent, RenderEvent,
+	RenderMode, SessionCreatedPayload, SessionEvent, SessionInfo, SessionRole, TabAppFramework,
+	TouchEvent,
 };
 /// Re-exported GL runtime types.
 pub use tab_app_framework_gl::{

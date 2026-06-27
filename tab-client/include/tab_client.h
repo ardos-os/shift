@@ -11,6 +11,8 @@ extern "C" {
 #include <stdbool.h>
 #include <stddef.h>
 
+#define TAB_PROTOCOL_VERSION "tab/v3.0.0"
+
 /* ============================================================================
  * OPAQUE HANDLE
  * ============================================================================
@@ -72,6 +74,13 @@ typedef enum {
 } TabAxisSource;
 
 typedef enum {
+    TAB_AXIS_PHASE_STARTED = 0,
+    TAB_AXIS_PHASE_MOVED = 1,
+    TAB_AXIS_PHASE_ENDED = 2,
+    TAB_AXIS_PHASE_CANCELLED = 3,
+} TabAxisPhase;
+
+typedef enum {
     TAB_KEY_PRESSED = 0,
     TAB_KEY_RELEASED = 1,
 } TabKeyState;
@@ -125,6 +134,7 @@ typedef struct {
     double delta;
     int32_t delta_discrete;
     TabAxisSource source;
+    TabAxisPhase phase;
 } TabInputPointerAxis;
 
 

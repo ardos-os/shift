@@ -1,4 +1,4 @@
-//! Shared Tab v1 protocol definitions and helpers for both client and server sides.
+//! Shared Tab v3 protocol definitions and helpers for both client and server sides.
 //! - Message framing over Unix domain sockets (sendmsg/recvmsg + SCM_RIGHTS)
 //! - Raw TabMessageFrame representation (header + payload string + FDs)
 //! - Parsing helpers into typed TabMessage variants
@@ -356,6 +356,7 @@ pub enum InputEventPayload {
 		delta: f64,
 		delta_discrete: Option<i32>,
 		source: AxisSource,
+		phase: AxisPhase,
 	},
 	Key {
 		device: u32,
@@ -559,18 +560,26 @@ pub struct TabletToolAxes {
 	pub buttons: Vec<u32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AxisOrientation {
 	Vertical,
 	Horizontal,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AxisSource {
 	Wheel,
 	Finger,
 	Continuous,
 	WheelTilt,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AxisPhase {
+	Started,
+	Moved,
+	Ended,
+	Cancelled,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

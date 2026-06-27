@@ -14,8 +14,10 @@ use tab_client::{
 	InputEvent as TabInputEvent, MonitorEvent as TabMonitorEvent, RenderEvent as TabRenderEvent,
 };
 use tab_client::{TabClient, TabClientConfig, TabClientError, TabSwapchain};
+pub use tab_protocol::{
+	AxisOrientation, AxisPhase, AxisSource, SessionCreatedPayload, SessionInfo, SessionRole,
+};
 use tab_protocol::{BufferIndex, ButtonState, InputEventPayload, KeyState, TouchContact};
-pub use tab_protocol::{SessionCreatedPayload, SessionInfo, SessionRole};
 use thiserror::Error;
 use tracing::{debug, info};
 
@@ -413,6 +415,28 @@ pub struct MouseUpEvent {
 	pub position: (f64, f64),
 }
 
+/// Pointer axis event, used by mouse wheels, touchpad two-finger scroll,
+/// and other pointer axis devices.
+#[derive(Debug, Clone)]
+pub struct PointerAxisEvent {
+	/// Source input device id.
+	pub device: u32,
+	/// Event timestamp in microseconds.
+	pub time_usec: u64,
+	/// Axis orientation.
+	pub orientation: AxisOrientation,
+	/// Continuous scroll delta.
+	pub delta: f64,
+	/// Discrete wheel delta when available.
+	pub delta_discrete: Option<i32>,
+	/// Source device/gesture class for this axis event.
+	pub source: AxisSource,
+	/// Scroll lifecycle phase.
+	pub phase: AxisPhase,
+	/// Cursor position in global layout space when the axis event occurred.
+	pub position: (f64, f64),
+}
+
 /// High-level touch event stream preserving contact ids for multitouch.
 #[derive(Debug, Clone)]
 pub enum TouchEvent {
@@ -545,6 +569,8 @@ pub trait Application: Sized + 'static {
 	fn on_pointer_down(&mut self, _ctx: &mut Context<Self>, _ev: PointerDownEvent) {}
 	/// Called when any pointer device produces an up transition.
 	fn on_pointer_up(&mut self, _ctx: &mut Context<Self>, _ev: PointerUpEvent) {}
+	/// Called when a pointer axis changes, e.g. mouse wheel or touchpad scroll.
+	fn on_pointer_axis(&mut self, _ctx: &mut Context<Self>, _ev: PointerAxisEvent) {}
 	/// Called when a mouse-like device produces a down transition.
 	fn on_mouse_down(&mut self, _ctx: &mut Context<Self>, _ev: MouseDownEvent) {}
 	/// Called when a mouse-like device produces an up transition.
@@ -725,6 +751,7 @@ pub struct TabAppFramework<A: Application> {
 	cursor_position: (f64, f64),
 	touch_contacts: HashMap<i32, (f64, f64)>,
 	primary_touch_id: Option<i32>,
+	active_scroll_axes: HashSet<(u32, AxisOrientation, AxisSource)>,
 }
 
 impl<A: Application> TabAppFramework<A> {
@@ -784,6 +811,7 @@ impl<A: Application> TabAppFramework<A> {
 			cursor_position: initial_cursor,
 			touch_contacts: HashMap::new(),
 			primary_touch_id: None,
+			active_scroll_axes: HashSet::new(),
 		})
 	}
 
@@ -1068,6 +1096,33 @@ impl<A: Application> TabAppFramework<A> {
 								true,
 							),
 						},
+						InputEventPayload::PointerAxis {
+							device,
+							time_usec,
+							orientation,
+							delta,
+							delta_discrete,
+							source,
+							phase,
+						} => {
+							let position = self.cursor_position;
+							let phase = self.resolve_axis_phase(device, &orientation, &source, phase);
+							self.call_app(|app, ctx| {
+								app.on_pointer_axis(
+									ctx,
+									PointerAxisEvent {
+										device,
+										time_usec,
+										orientation,
+										delta,
+										delta_discrete,
+										source,
+										phase,
+										position,
+									},
+								)
+							});
+						}
 						InputEventPayload::PointerMotionAbsolute {
 							device,
 							time_usec,
@@ -1511,6 +1566,37 @@ impl<A: Application> TabAppFramework<A> {
 		}
 		for err in errors {
 			self.call_app(|app, ctx| app.on_error(ctx, &err));
+		}
+	}
+
+	fn resolve_axis_phase(
+		&mut self,
+		device: u32,
+		orientation: &AxisOrientation,
+		source: &AxisSource,
+		phase: AxisPhase,
+	) -> AxisPhase {
+		if !matches!(source, AxisSource::Finger | AxisSource::Continuous) {
+			return phase;
+		}
+
+		let key = (device, orientation.clone(), source.clone());
+		match phase {
+			AxisPhase::Moved => {
+				if self.active_scroll_axes.insert(key) {
+					AxisPhase::Started
+				} else {
+					AxisPhase::Moved
+				}
+			}
+			AxisPhase::Started => {
+				self.active_scroll_axes.insert(key);
+				AxisPhase::Started
+			}
+			AxisPhase::Ended | AxisPhase::Cancelled => {
+				self.active_scroll_axes.remove(&key);
+				phase
+			}
 		}
 	}
 
