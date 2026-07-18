@@ -31,7 +31,7 @@ tokio = {version="1.49.0", features=["macros", "net", "rt-multi-thread", "time",
 anyhow = "1.0"
 #skia-safe = { git = "https://github.com/coffeeispower/rust-skia.git", rev = "e51839613c4841e5e09e7d50d94f78bd4d811130", version = "0.91.0", default-features = false, features = ["gl", "binary-cache"] }
 
-skia-safe = {version = "0.91",  features=["gl", "binary-cache"]}
+skia-safe = { git = "https://github.com/ardos-os/rust-skia.git", rev = "b2798577", version = "0.91.0", default-features = false, features = ["gl"] }
 [profile.release-with-debug]
 inherits = "release"
 debug = true
