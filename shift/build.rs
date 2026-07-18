@@ -26,6 +26,14 @@ fn main() {
 	)
 	.write_bindings(gl_generator::StructGenerator, &mut egl_file)
 	.unwrap();
-
+	#[cfg(target_vendor = "ardos")]
+	{
+		println!("cargo::rustc-link-lib=png");
+		println!("cargo::rustc-link-lib=wacom");
+		println!("cargo::rustc-link-lib=evdev");
+		println!("cargo::rustc-link-lib=mtdev");
+		println!("cargo::rustc-link-lib=expat");
+		println!("cargo::rustc-link-lib=drm");
+	}
 	println!("cargo:rerun-if-changed=build.rs");
 }
