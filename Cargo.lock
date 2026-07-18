@@ -1142,7 +1142,7 @@ checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
 [[package]]
 name = "skia-bindings"
 version = "0.91.0"
-source = "git+https://github.com/ardos-os/rust-skia.git?rev=b2798577#b279857776e8b1f6ffbd7a59a83dc27dc4d065ed"
+source = "git+https://github.com/ardos-os/rust-skia.git?rev=fd5e6c8c#fd5e6c8c7b475c9804603c99bbcb68519fd03088"
 dependencies = [
  "bindgen",
  "cc",
@@ -1156,7 +1156,7 @@ dependencies = [
 [[package]]
 name = "skia-safe"
 version = "0.91.0"
-source = "git+https://github.com/ardos-os/rust-skia.git?rev=b2798577#b279857776e8b1f6ffbd7a59a83dc27dc4d065ed"
+source = "git+https://github.com/ardos-os/rust-skia.git?rev=fd5e6c8c#fd5e6c8c7b475c9804603c99bbcb68519fd03088"
 dependencies = [
  "bitflags 2.13.1",
  "skia-bindings",
