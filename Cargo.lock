@@ -251,9 +251,8 @@ dependencies = [
 
 [[package]]
 name = "easydrm"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "55c4411ac398f44aaa154de6e37bc1bffcb7c189428799bc8b169059bc3f6e32"
+version = "0.3.0"
+source = "git+https://github.com/ardos-os/easydrm?rev=5645dd601a1847ac4c48670ba7486a7dbf1f8cbb#5645dd601a1847ac4c48670ba7486a7dbf1f8cbb"
 dependencies = [
  "drm",
  "drm-sys",
